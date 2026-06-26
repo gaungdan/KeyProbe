@@ -1,0 +1,10 @@
+.env
+config.json
+logs/
+build/
+dist/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.spec
