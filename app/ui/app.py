@@ -9,6 +9,7 @@ import customtkinter as ctk
 from app.checker.client import LLMChecker
 from app.models.check import CheckStatus
 from app.models.config import AppConfig, UrlMode
+from app.services.cc_switch import CCSwitchImportResult, CCSwitchProvider, load_cc_switch_providers
 from app.services.config_store import load_config, save_config
 from app.services.logger_service import LoggerService
 from app.services.providers import (
@@ -29,8 +30,10 @@ from app.services.url_builder import (
 )
 from app.ui.log_panel import LogPanel
 from app.ui.result_panel import ResultPanel
+from app.utils.security import mask_api_key
 
 MODEL_PLACEHOLDER = "（先获取模型）"
+CC_SWITCH_PLACEHOLDER = "（请先导入配置）"
 
 
 class KeyProbeApp(ctk.CTk):
@@ -44,6 +47,10 @@ class KeyProbeApp(ctk.CTk):
         self.checker = LLMChecker(log=self._checker_log)
         self.is_processing = False
         self._models: list[str] = []
+        self._cc_switch_providers: dict[str, CCSwitchProvider] = {}
+        self._selected_cc_switch_provider: CCSwitchProvider | None = None
+        self._provider_source = "auto"
+        self._suppress_provider_change = False
 
         self._setup_window()
         self._create_widgets()
@@ -107,27 +114,44 @@ class KeyProbeApp(ctk.CTk):
         )
         self.eye_btn.grid(row=0, column=1, padx=(6, 0))
 
+        # CC Switch 导入
+        ctk.CTkLabel(form, text="CC Switch 配置", font=("Helvetica", 14)).grid(
+            row=3, column=0, sticky="w", padx=15, pady=8
+        )
+        self.cc_switch_menu = ctk.CTkComboBox(
+            form,
+            values=[CC_SWITCH_PLACEHOLDER],
+            state="disabled",
+            command=self._on_cc_switch_provider_selected,
+        )
+        self.cc_switch_menu.grid(row=3, column=1, sticky="ew", padx=15, pady=8)
+        self.cc_switch_menu.set(CC_SWITCH_PLACEHOLDER)
+
         # 服务商/协议
         ctk.CTkLabel(form, text="服务商/协议", font=("Helvetica", 14)).grid(
-            row=3, column=0, sticky="w", padx=15, pady=8
+            row=4, column=0, sticky="w", padx=15, pady=8
         )
         self.provider_menu = ctk.CTkOptionMenu(
             form, values=PROVIDER_OPTIONS, command=self._on_provider_change
         )
-        self.provider_menu.grid(row=3, column=1, sticky="ew", padx=15, pady=8)
+        self.provider_menu.grid(row=4, column=1, sticky="ew", padx=15, pady=8)
 
-        self.timeout_entry = self._form_entry(form, 4, "超时时间（秒）", "30")
+        self.timeout_entry = self._form_entry(form, 5, "超时时间（秒）", "30")
 
         # 模型
         ctk.CTkLabel(form, text="模型", font=("Helvetica", 14)).grid(
-            row=5, column=0, sticky="w", padx=15, pady=8
+            row=6, column=0, sticky="w", padx=15, pady=8
         )
         self.model_menu = ctk.CTkComboBox(form, values=[MODEL_PLACEHOLDER])
-        self.model_menu.grid(row=5, column=1, sticky="ew", padx=15, pady=8)
+        self.model_menu.grid(row=6, column=1, sticky="ew", padx=15, pady=8)
 
         # 操作按钮
         actions = ctk.CTkFrame(self, fg_color="transparent")
         actions.pack(fill="x", padx=20, pady=(0, 6))
+        self.import_btn = ctk.CTkButton(
+            actions, text="导入 CC Switch 配置", height=40, command=self._on_import_cc_switch
+        )
+        self.import_btn.pack(side="left", padx=5)
         self.fetch_btn = ctk.CTkButton(
             actions, text="获取模型", height=40, command=self._on_fetch_models
         )
@@ -179,13 +203,12 @@ class KeyProbeApp(ctk.CTk):
         self._set_entry(self.timeout_entry, str(cfg.timeout))
         provider = normalize_provider(cfg.provider)
         if provider in PROVIDER_OPTIONS:
-            self.provider_menu.set(provider)
+            self._set_provider(provider, source="config")
         if cfg.url_mode == "auto":
             self.url_mode_switch.select()
         else:
             self.url_mode_switch.deselect()
         self._update_url_mode_label()
-        self._select_provider_from_base_url()
         if cfg.model:
             self._models = [cfg.model]
             self.model_menu.configure(values=[cfg.model])
@@ -223,10 +246,17 @@ class KeyProbeApp(ctk.CTk):
         )
 
     def _on_provider_change(self, choice: str) -> None:
+        if self._suppress_provider_change:
+            return
+        self._provider_source = "manual"
+        self._selected_cc_switch_provider = None
         self._update_curl_preview()
 
     # ---------- 事件 ----------
     def _on_base_url_typing(self, event=None) -> None:
+        if self._provider_source == "cc_switch":
+            self._provider_source = "manual"
+        self._selected_cc_switch_provider = None
         self._update_curl_preview()
 
     def _on_base_url_confirmed(self, event=None) -> None:
@@ -237,10 +267,25 @@ class KeyProbeApp(ctk.CTk):
         base_url = self.base_url_entry.get().strip()
         if not base_url:
             return
+        if self._provider_source in {"manual", "config", "cc_switch"}:
+            return
+        if (
+            self._selected_cc_switch_provider is not None
+            and base_url == self._selected_cc_switch_provider.base_url
+        ):
+            return
 
         provider = detect_provider(base_url)
         if provider in PROVIDER_OPTIONS and self.provider_menu.get() != provider:
+            self._set_provider(provider, source="auto")
+
+    def _set_provider(self, provider: str, *, source: str) -> None:
+        self._suppress_provider_change = True
+        try:
             self.provider_menu.set(provider)
+        finally:
+            self._suppress_provider_change = False
+        self._provider_source = source
 
     def _update_url_mode_label(self) -> None:
         if self.url_mode_switch.get():
@@ -260,8 +305,72 @@ class KeyProbeApp(ctk.CTk):
     def _lock(self, locked: bool) -> None:
         self.is_processing = locked
         state = "disabled" if locked else "normal"
+        self.import_btn.configure(state=state)
         self.fetch_btn.configure(state=state)
         self.test_btn.configure(state=state)
+        self.cc_switch_menu.configure(
+            state="disabled" if locked or not self._cc_switch_providers else "normal"
+        )
+
+    def _on_import_cc_switch(self) -> None:
+        if self.is_processing:
+            self.logger.warning("正在处理中，请稍候...")
+            return
+        self._lock(True)
+        threading.Thread(target=self._import_cc_switch_worker, daemon=True).start()
+
+    def _import_cc_switch_worker(self) -> None:
+        try:
+            self.logger.info("========== 导入 CC Switch 配置 ==========")
+            result = load_cc_switch_providers()
+            self.after(0, lambda: self._apply_cc_switch_import(result))
+        except Exception as exc:  # noqa: BLE001
+            self.logger.error(f"导入 CC Switch 配置失败：{exc}")
+        finally:
+            self.after(0, lambda: self._lock(False))
+
+    def _apply_cc_switch_import(self, result: CCSwitchImportResult) -> None:
+        if result.error_message:
+            self._cc_switch_providers = {}
+            self.cc_switch_menu.configure(values=[CC_SWITCH_PLACEHOLDER], state="disabled")
+            self.cc_switch_menu.set(CC_SWITCH_PLACEHOLDER)
+            self.logger.error(result.error_message)
+            return
+
+        self._cc_switch_providers = {
+            provider.display_name: provider for provider in result.providers
+        }
+        labels = list(self._cc_switch_providers)
+        self.cc_switch_menu.configure(values=labels, state="normal")
+        self.cc_switch_menu.set(CC_SWITCH_PLACEHOLDER)
+        self.logger.success(
+            f"已从 CC Switch 导入 {len(labels)} 个可检测配置：{result.source_path}"
+        )
+        if result.skipped_count:
+            self.logger.info(f"已跳过 {result.skipped_count} 个不完整或不支持的配置")
+
+    def _on_cc_switch_provider_selected(self, choice: str) -> None:
+        provider = self._cc_switch_providers.get(choice)
+        if provider is None:
+            return
+
+        self._selected_cc_switch_provider = provider
+        self._set_entry(self.base_url_entry, provider.base_url)
+        self._set_entry(self.api_key_entry, provider.api_key)
+        if provider.url_mode == "auto":
+            self.url_mode_switch.select()
+        else:
+            self.url_mode_switch.deselect()
+        self._set_provider(provider.provider, source="cc_switch")
+        self._models = [provider.model]
+        self.model_menu.configure(values=self._models)
+        self.model_menu.set(provider.model)
+        self.result_panel.set_model_count(1)
+        self._update_url_mode_label()
+        self._update_curl_preview()
+        self.logger.info(
+            f"已加载 CC Switch 配置：{provider.display_name}，默认模型：{provider.model}"
+        )
 
     def _on_fetch_models(self) -> None:
         if self.is_processing:
@@ -359,7 +468,7 @@ class KeyProbeApp(ctk.CTk):
     def _update_curl_preview(self) -> None:
         base_url = self.base_url_entry.get().strip()
         provider = self.provider_menu.get()
-        api_key = self.api_key_entry.get()
+        api_key = mask_api_key(self.api_key_entry.get())
         model = self.model_menu.get()
         if model == MODEL_PLACEHOLDER:
             model = "<模型>"
