@@ -1,7 +1,18 @@
+import asyncio
+import json
+
 import httpx
 
 from app.checker.client import LLMChecker
-from app.services.providers import ANTHROPIC, AMAZON_BEDROCK, GOOGLE_GEMINI, OPENAI_COMPATIBLE, detect_provider
+from app.services.bedrock_auth import parse_aws_credentials, sign_bedrock_request
+from app.services.providers import (
+    ANTHROPIC,
+    AMAZON_BEDROCK,
+    GOOGLE_GEMINI,
+    OPENAI_COMPATIBLE,
+    OPENAI_RESPONSES,
+    detect_provider,
+)
 from app.services.url_builder import (
     anthropic_model_urls,
     openai_model_urls,
@@ -87,6 +98,14 @@ def test_parse_models_accepts_common_compatible_fields() -> None:
     ]
 
 
+def test_parse_models_understands_bedrock_and_gemini_payloads() -> None:
+    bedrock = httpx.Response(200, json={"modelSummaries": [{"modelId": "amazon.nova-lite-v1:0"}]})
+    gemini = httpx.Response(200, json={"models": [{"name": "models/gemini-2.5-flash"}]})
+
+    assert LLMChecker()._parse_models(bedrock, AMAZON_BEDROCK) == ["amazon.nova-lite-v1:0"]
+    assert LLMChecker()._parse_models(gemini, GOOGLE_GEMINI) == ["gemini-2.5-flash"]
+
+
 def test_anthropic_route_overrides_openai_provider_selection() -> None:
     checker = LLMChecker()
 
@@ -106,3 +125,64 @@ def test_anthropic_route_overrides_openai_provider_selection() -> None:
         "https://token-plan-cn.xiaomimimo.com/v1/models",
         "https://token-plan-cn.xiaomimimo.com/models",
     ]
+
+
+def test_native_protocol_requests() -> None:
+    cases = [
+        (
+            OPENAI_RESPONSES, "https://api.openai.com/v1", "gpt-4.1-mini", "sk-test",
+            "https://api.openai.com/v1/responses",
+            {"model": "gpt-4.1-mini", "input": "hello", "max_output_tokens": 16, "temperature": 0},
+            "authorization",
+        ),
+        (
+            GOOGLE_GEMINI, "https://generativelanguage.googleapis.com", "gemini-2.5-flash", "gem-key",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            {"contents": [{"role": "user", "parts": [{"text": "hello"}]}], "generationConfig": {"temperature": 0, "maxOutputTokens": 16}},
+            "x-goog-api-key",
+        ),
+        (
+            AMAZON_BEDROCK, "https://bedrock-runtime.us-east-1.amazonaws.com", "amazon.nova-lite-v1:0", "bedrock-key",
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/amazon.nova-lite-v1%3A0/invoke",
+            {"messages": [{"role": "user", "content": [{"text": "hello"}]}], "inferenceConfig": {"maxTokens": 16, "temperature": 0}},
+            "authorization",
+        ),
+    ]
+
+    async def run_case(
+        provider: str, base_url: str, model: str, api_key: str, expected_url: str,
+        expected_body: dict[str, object], header_name: str,
+    ) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"id": "ok"})
+
+        result = await LLMChecker(transport=httpx.MockTransport(handler)).test_model(
+            provider=provider, api_key=api_key, model=model, timeout=5,
+            url_mode="auto", base_url=base_url,
+        )
+        assert result.status.value == "VALID"
+        assert str(requests[0].url) == expected_url
+        assert requests[0].headers[header_name]
+        assert json.loads(requests[0].content) == expected_body
+
+    async def run_all() -> None:
+        for case in cases:
+            await run_case(*case)
+
+    asyncio.run(run_all())
+
+
+def test_bedrock_sigv4_uses_runtime_service_and_session_token() -> None:
+    credentials = parse_aws_credentials("AKID|secret|session")
+    assert credentials == ("AKID", "secret", "session")
+    headers = sign_bedrock_request(
+        credentials=credentials,
+        method="POST",
+        url="https://bedrock-runtime.us-east-1.amazonaws.com/model/m/invoke",
+        payload=b"{}",
+    )
+    assert "bedrock-runtime" in headers["Authorization"]
+    assert headers["X-Amz-Security-Token"] == "session"

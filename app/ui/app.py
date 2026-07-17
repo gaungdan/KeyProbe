@@ -12,6 +12,9 @@ from app.models.config import AppConfig, UrlMode
 from app.services.config_store import load_config, save_config
 from app.services.logger_service import LoggerService
 from app.services.providers import (
+    AMAZON_BEDROCK,
+    GOOGLE_GEMINI,
+    OPENAI_RESPONSES,
     PROVIDER_OPTIONS,
     detect_provider,
     is_anthropic_provider,
@@ -19,7 +22,10 @@ from app.services.providers import (
 )
 from app.services.url_builder import (
     anthropic_test_urls,
+    bedrock_test_urls,
+    gemini_test_urls,
     openai_test_urls,
+    responses_test_urls,
 )
 from app.ui.log_panel import LogPanel
 from app.ui.result_panel import ResultPanel
@@ -366,12 +372,27 @@ class KeyProbeApp(ctk.CTk):
             url = base_url
         elif is_anthropic_provider(provider):
             url = anthropic_test_urls(base_url)[0]
+        elif provider == AMAZON_BEDROCK:
+            url = bedrock_test_urls(base_url, model)[0]
+        elif provider == GOOGLE_GEMINI:
+            url = gemini_test_urls(base_url, model)[0]
+        elif provider == OPENAI_RESPONSES:
+            url = responses_test_urls(base_url)[0]
         else:
             url = openai_test_urls(base_url)[0]
 
         if is_anthropic_provider(provider):
             auth = f'-H "x-api-key: {api_key}" -H "anthropic-version: 2023-06-01"'
             body = {"model": model, "max_tokens": 16, "messages": [{"role": "user", "content": "hello"}]}
+        elif provider == GOOGLE_GEMINI:
+            auth = f'-H "x-goog-api-key: {api_key}"'
+            body = {"contents": [{"role": "user", "parts": [{"text": "hello"}]}], "generationConfig": {"maxOutputTokens": 16, "temperature": 0}}
+        elif provider == AMAZON_BEDROCK:
+            auth = f'-H "Authorization: Bearer {api_key}"'
+            body = {"messages": [{"role": "user", "content": [{"text": "hello"}]}], "inferenceConfig": {"maxTokens": 16, "temperature": 0}}
+        elif provider == OPENAI_RESPONSES:
+            auth = f'-H "Authorization: Bearer {api_key}"'
+            body = {"model": model, "input": "hello", "max_output_tokens": 16, "temperature": 0}
         else:
             auth = f'-H "Authorization: Bearer {api_key}"'
             body = {"model": model, "messages": [{"role": "user", "content": "hello"}], "max_tokens": 16}

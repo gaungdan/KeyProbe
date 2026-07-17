@@ -1,6 +1,7 @@
 """Build request URLs for auto and full URL modes."""
 
 from collections.abc import Iterable
+from urllib.parse import quote, urlparse, urlunparse
 
 
 def normalize_base_url(base_url: str) -> str:
@@ -76,3 +77,46 @@ def anthropic_test_urls(base_url: str) -> list[str]:
     """Candidate message URLs for Anthropic providers."""
 
     return [join_url(base_url, "/v1/messages")]
+
+
+def responses_model_urls(base_url: str) -> list[str]:
+    """Candidate model list URLs for the OpenAI Responses API."""
+
+    return openai_model_urls(base_url)
+
+
+def responses_test_urls(base_url: str) -> list[str]:
+    """Candidate OpenAI Responses URLs."""
+
+    return [join_url(base_url, "/responses")]
+
+
+def gemini_model_urls(base_url: str) -> list[str]:
+    """Google Generative Language model discovery endpoint."""
+
+    base = normalize_base_url(base_url)
+    return [join_url(base, "/models") if base.lower().endswith(("/v1", "/v1beta")) else join_url(base, "/v1beta/models")]
+
+
+def gemini_test_urls(base_url: str, model: str) -> list[str]:
+    """Google Gemini generateContent endpoint for a model."""
+
+    base = normalize_base_url(base_url)
+    path = f"/models/{quote(model, safe='._-')}:generateContent"
+    return [join_url(base, path) if base.lower().endswith(("/v1", "/v1beta")) else join_url(base, "/v1beta" + path)]
+
+
+def bedrock_model_urls(base_url: str) -> list[str]:
+    """Bedrock control-plane foundation-model discovery endpoint."""
+
+    base = normalize_base_url(base_url)
+    parsed = urlparse(base)
+    host = parsed.netloc.replace("bedrock-runtime.", "bedrock.", 1)
+    root = urlunparse((parsed.scheme, host, "", "", "", ""))
+    return [join_url(root, "/foundation-models")]
+
+
+def bedrock_test_urls(base_url: str, model: str) -> list[str]:
+    """Bedrock Runtime InvokeModel endpoint for a foundation model."""
+
+    return [join_url(base_url, f"/model/{quote(model, safe='._-')}/invoke")]

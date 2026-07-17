@@ -49,6 +49,15 @@ https://api.openai.com/v1
 https://api.openai.com/v1/chat/completions
 ```
 
+不同 Provider 会使用各自的原生协议，而不是统一伪装成 Chat Completions：
+
+- OpenAI Responses：`POST /responses`，请求体使用 `input` 与 `max_output_tokens`。
+- Gemini：`GET /v1beta/models`、`POST /v1beta/models/{model}:generateContent`，使用 `x-goog-api-key`。
+- Bedrock：`GET /foundation-models`、`POST /model/{model}/invoke`，请求体使用 Bedrock Messages 格式。
+
+Bedrock 的 API Key 输入框可填 Bedrock API Key（按 Bearer 认证）；若直接访问 AWS Runtime，也可填写
+`accessKeyId|secretAccessKey|sessionToken`（session token 可省略），工具会生成 AWS SigV4 签名。
+
 开关关闭时，工具不拼接路径，直接请求 `baseURL` 输入框里的完整地址。
 
 ## 打包 exe

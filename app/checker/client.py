@@ -11,18 +11,28 @@ import httpx
 from app.models.check import CheckResult, CheckStatus, ModelFetchResult
 from app.models.config import UrlMode
 from app.services.providers import (
+    AMAZON_BEDROCK,
     ANTHROPIC,
     ANTHROPIC_DEFAULT_MODELS,
+    GOOGLE_GEMINI,
     OPENAI_COMPATIBLE,
+    OPENAI_RESPONSES,
     is_anthropic_provider,
     normalize_provider,
 )
 from app.services.url_builder import (
     anthropic_model_urls,
     anthropic_test_urls,
+    bedrock_model_urls,
+    bedrock_test_urls,
+    gemini_model_urls,
+    gemini_test_urls,
     openai_model_urls,
     openai_test_urls,
+    responses_model_urls,
+    responses_test_urls,
 )
+from app.services.bedrock_auth import parse_aws_credentials, sign_bedrock_request
 
 LogCallback = Callable[[str], None]
 
@@ -30,8 +40,11 @@ LogCallback = Callable[[str], None]
 class LLMChecker:
     """Check model listing and chat/message calls for providers."""
 
-    def __init__(self, log: LogCallback | None = None) -> None:
+    def __init__(
+        self, log: LogCallback | None = None, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None:
         self._log = log or (lambda message: None)
+        self._transport = transport
 
     async def fetch_models(
         self,
@@ -91,10 +104,10 @@ class LLMChecker:
         url_mode: UrlMode,
         urls: list[str],
     ) -> ModelFetchResult:
-        headers = self._headers(provider, api_key)
         last_error = ""
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
             for url in urls:
+                headers = self._headers(provider, api_key, "GET", url)
                 self._log(f"请求 GET {url}")
                 started = perf_counter()
                 try:
@@ -124,7 +137,7 @@ class LLMChecker:
                     self._log(f"获取模型失败：HTTP {response.status_code} {last_error}，尝试备用地址")
                     continue
 
-                models = self._parse_models(response)
+                models = self._parse_models(response, provider)
                 self._log(f"获取模型成功，共发现 {len(models)} 个模型")
                 return ModelFetchResult(
                     provider=provider,
@@ -176,7 +189,7 @@ class LLMChecker:
         urls = (
             [test_url.strip() or base_url.strip()]
             if url_mode == "full"
-            else self._test_urls(effective_provider, base_url)
+            else self._test_urls(effective_provider, base_url, model)
         )
         if not urls or not urls[0]:
             return CheckResult(
@@ -212,12 +225,12 @@ class LLMChecker:
         urls: list[str],
         model_count: int,
     ) -> CheckResult:
-        headers = self._headers(provider, api_key)
         body = self._body(provider, model)
         last_result: CheckResult | None = None
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
             for url in urls:
+                headers = self._headers(provider, api_key, "POST", url, body)
                 self._log(f"请求 POST {url}")
                 started = perf_counter()
                 try:
@@ -290,11 +303,23 @@ class LLMChecker:
     def _model_urls(self, provider: str, base_url: str) -> list[str]:
         if is_anthropic_provider(provider):
             return anthropic_model_urls(base_url)
+        if provider == AMAZON_BEDROCK:
+            return bedrock_model_urls(base_url)
+        if provider == GOOGLE_GEMINI:
+            return gemini_model_urls(base_url)
+        if provider == OPENAI_RESPONSES:
+            return responses_model_urls(base_url)
         return openai_model_urls(base_url)
 
-    def _test_urls(self, provider: str, base_url: str) -> list[str]:
+    def _test_urls(self, provider: str, base_url: str, model: str = "") -> list[str]:
         if is_anthropic_provider(provider):
             return anthropic_test_urls(base_url)
+        if provider == AMAZON_BEDROCK:
+            return bedrock_test_urls(base_url, model)
+        if provider == GOOGLE_GEMINI:
+            return gemini_test_urls(base_url, model)
+        if provider == OPENAI_RESPONSES:
+            return responses_test_urls(base_url)
         return openai_test_urls(base_url)
 
     def _effective_provider(self, provider: str, base_url: str) -> str:
@@ -309,13 +334,25 @@ class LLMChecker:
         parts = [part for part in path.split("/") if part]
         return any(part in {"anthropic", "claude"} for part in parts)
 
-    def _headers(self, provider: str, api_key: str) -> dict[str, str]:
+    def _headers(
+        self, provider: str, api_key: str, method: str = "GET", url: str = "", body: dict[str, Any] | None = None
+    ) -> dict[str, str]:
         if is_anthropic_provider(provider):
             return {
                 "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             }
+        if provider == GOOGLE_GEMINI:
+            return {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+        if provider == AMAZON_BEDROCK:
+            credentials = parse_aws_credentials(api_key)
+            if credentials:
+                payload = json.dumps(body, separators=(",", ":")).encode("utf-8") if body else b""
+                return {"Content-Type": "application/json", **sign_bedrock_request(
+                    credentials=credentials, method=method, url=url, payload=payload
+                )}
+            return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         return {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -328,6 +365,18 @@ class LLMChecker:
                 "max_tokens": 16,
                 "messages": [{"role": "user", "content": "hello"}],
             }
+        if provider == GOOGLE_GEMINI:
+            return {
+                "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+                "generationConfig": {"temperature": 0, "maxOutputTokens": 16},
+            }
+        if provider == AMAZON_BEDROCK:
+            return {
+                "messages": [{"role": "user", "content": [{"text": "hello"}]}],
+                "inferenceConfig": {"maxTokens": 16, "temperature": 0},
+            }
+        if provider == OPENAI_RESPONSES:
+            return {"model": model, "input": "hello", "max_output_tokens": 16, "temperature": 0}
         return {
             "model": model,
             "messages": [
@@ -338,7 +387,7 @@ class LLMChecker:
             "max_tokens": 16,
         }
 
-    def _parse_models(self, response: httpx.Response) -> list[str]:
+    def _parse_models(self, response: httpx.Response, provider: str = "") -> list[str]:
         payload = self._safe_json(response)
         models: list[str] = []
 
@@ -352,16 +401,21 @@ class LLMChecker:
             entries = payload.get("models")
             if isinstance(entries, list):
                 self._extract_model_ids(entries, models)
+            summaries = payload.get("modelSummaries")
+            if isinstance(summaries, list):
+                self._extract_model_ids(summaries, models)
         elif isinstance(payload, list):
             self._extract_model_ids(payload, models)
 
+        if provider == GOOGLE_GEMINI:
+            models = [model.removeprefix("models/") for model in models]
         return sorted(set(models))
 
     @staticmethod
     def _extract_model_ids(items: list[Any], out: list[str]) -> None:
         for item in items:
             if isinstance(item, dict):
-                for key in ("id", "name", "model"):
+                for key in ("id", "name", "model", "modelId"):
                     value = item.get(key)
                     if value and str(value).strip():
                         out.append(str(value).strip())
