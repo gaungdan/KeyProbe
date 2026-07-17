@@ -3,8 +3,10 @@
 import asyncio
 import json
 import threading
+from pathlib import Path
 
 import customtkinter as ctk
+from PIL import Image
 
 from app.checker.client import LLMChecker
 from app.models.check import CheckStatus
@@ -59,6 +61,15 @@ class KeyProbeApp(ctk.CTk):
             lambda line: self.after(0, self.log_panel.log, line)
         )
 
+    _ASSETS = Path(__file__).resolve().parent / "assets"
+
+    @staticmethod
+    def _load_icon(name: str, size: int = 20) -> ctk.CTkImage:
+        base = KeyProbeApp._ASSETS
+        light = Image.open(base / f"{name}-light.png").resize((size, size), Image.LANCZOS)
+        dark = Image.open(base / f"{name}.png").resize((size, size), Image.LANCZOS)
+        return ctk.CTkImage(light_image=light, dark_image=dark, size=(size, size))
+
     # ---------- 窗口与组件 ----------
     def _setup_window(self) -> None:
         self.title("KeyProbe - LLM Key Checker")
@@ -100,7 +111,7 @@ class KeyProbeApp(ctk.CTk):
         self.url_mode_label = ctk.CTkLabel(switch_box, text="", font=("Helvetica", 13))
         self.url_mode_label.pack(side="left", padx=10)
 
-        ctk.CTkLabel(form, text="访问密钥", font=("Helvetica", 14)).grid(
+        ctk.CTkLabel(form, text="密钥", font=("Helvetica", 14)).grid(
             row=2, column=0, sticky="w", padx=15, pady=8
         )
         key_frame = ctk.CTkFrame(form, fg_color="transparent")
@@ -109,8 +120,11 @@ class KeyProbeApp(ctk.CTk):
         self.api_key_entry = ctk.CTkEntry(key_frame, placeholder_text="sk-...", height=38, show="*")
         self.api_key_entry.grid(row=0, column=0, sticky="ew")
         self._api_key_visible = False
+        self._eye_icon = self._load_icon("eye")
+        self._eye_off_icon = self._load_icon("eye-off")
         self.eye_btn = ctk.CTkButton(
-            key_frame, text="👁", width=38, height=38, command=self._toggle_key_visible
+            key_frame, image=self._eye_icon, text="", width=38, height=38,
+            command=self._toggle_key_visible,
         )
         self.eye_btn.grid(row=0, column=1, padx=(6, 0))
 
@@ -297,7 +311,7 @@ class KeyProbeApp(ctk.CTk):
     def _toggle_key_visible(self) -> None:
         self._api_key_visible = not self._api_key_visible
         self.api_key_entry.configure(show="" if self._api_key_visible else "*")
-        self.eye_btn.configure(text="🙈" if self._api_key_visible else "👁")
+        self.eye_btn.configure(image=self._eye_off_icon if self._api_key_visible else self._eye_icon)
 
     def _checker_log(self, message: str) -> None:
         self.logger.info(message)
