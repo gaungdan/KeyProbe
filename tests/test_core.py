@@ -15,6 +15,7 @@ from app.services.providers import (
 )
 from app.services.url_builder import (
     anthropic_model_urls,
+    full_url_model_urls,
     openai_model_urls,
     openai_test_urls,
 )
@@ -28,6 +29,12 @@ def test_openai_url_builder_avoids_duplicate_v1() -> None:
     assert openai_test_urls("https://api.openai.com/v1") == [
         "https://api.openai.com/v1/chat/completions"
     ]
+    assert openai_model_urls("https://api.gemai.cc/v1") == [
+        "https://api.gemai.cc/v1/models",
+    ]
+    assert openai_test_urls("https://api.gemai.cc/v1") == [
+        "https://api.gemai.cc/v1/chat/completions",
+    ]
 
 
 def test_openai_url_builder_appends_suffix_only() -> None:
@@ -37,6 +44,26 @@ def test_openai_url_builder_appends_suffix_only() -> None:
     ]
     assert openai_test_urls("https://api.openai.com") == [
         "https://api.openai.com/chat/completions"
+    ]
+
+
+def test_openai_url_builder_prefers_models_for_versioned_base() -> None:
+    assert openai_model_urls("https://open.bigmodel.cn/api/coding/paas/v4") == [
+        "https://open.bigmodel.cn/api/coding/paas/v4/models",
+        "https://open.bigmodel.cn/api/coding/paas/v4/v1/models",
+    ]
+    assert openai_model_urls("https://api.example.com/v10") == [
+        "https://api.example.com/v10/models",
+        "https://api.example.com/v10/v1/models",
+    ]
+
+
+def test_full_request_url_derives_models_endpoint() -> None:
+    assert full_url_model_urls("https://token.sensenova.cn/v1/messages") == [
+        "https://token.sensenova.cn/v1/models",
+    ]
+    assert full_url_model_urls("https://proxy.example.com/v1/chat/completions") == [
+        "https://proxy.example.com/v1/models",
     ]
 
 
@@ -53,6 +80,18 @@ def test_anthropic_url_builder_tries_models_fallback() -> None:
         "https://token-plan-cn.xiaomimimo.com/anthropic/models",
         "https://token-plan-cn.xiaomimimo.com/v1/models",
         "https://token-plan-cn.xiaomimimo.com/models",
+    ]
+    assert anthropic_model_urls("https://open.bigmodel.cn/api/anthropic") == [
+        "https://open.bigmodel.cn/api/anthropic/v1/models",
+        "https://open.bigmodel.cn/api/anthropic/models",
+        "https://open.bigmodel.cn/v1/models",
+        "https://open.bigmodel.cn/models",
+    ]
+    assert anthropic_model_urls("https://dashscope.aliyuncs.com/apps/anthropic") == [
+        "https://dashscope.aliyuncs.com/apps/anthropic/v1/models",
+        "https://dashscope.aliyuncs.com/apps/anthropic/models",
+        "https://dashscope.aliyuncs.com/v1/models",
+        "https://dashscope.aliyuncs.com/models",
     ]
 
 
@@ -106,6 +145,65 @@ def test_parse_models_understands_bedrock_and_gemini_payloads() -> None:
     assert LLMChecker()._parse_models(gemini, GOOGLE_GEMINI) == ["gemini-2.5-flash"]
 
 
+def test_fetch_models_full_url_derives_model_endpoint() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"data": [{"id": "claude-sonnet-test"}]})
+
+    async def run_case() -> None:
+        result = await LLMChecker(transport=httpx.MockTransport(handler)).fetch_models(
+            provider=ANTHROPIC,
+            api_key="sk-test",
+            timeout=5,
+            url_mode="full",
+            base_url="https://token.sensenova.cn/v1/messages",
+        )
+        assert result.models == ["claude-sonnet-test"]
+
+    asyncio.run(run_case())
+
+    assert str(requests[0].url) == "https://token.sensenova.cn/v1/models"
+
+
+def test_anthropic_auth_fallback_keeps_messages_body() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            assert request.headers["x-api-key"] == "sk-test"
+            return httpx.Response(401, json={"error": {"message": "Authorization Not Found"}})
+
+        body = json.loads(request.content)
+        assert request.headers["authorization"] == "Bearer sk-test"
+        assert body == {
+            "model": "claude-test",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        return httpx.Response(200, json={"id": "ok"})
+
+    async def run_case() -> None:
+        result = await LLMChecker(transport=httpx.MockTransport(handler)).test_model(
+            provider=ANTHROPIC,
+            api_key="sk-test",
+            model="claude-test",
+            timeout=5,
+            url_mode="full",
+            base_url="https://token.sensenova.cn/v1/messages",
+        )
+        assert result.status.value == "VALID"
+
+    asyncio.run(run_case())
+
+    assert [str(request.url) for request in requests] == [
+        "https://token.sensenova.cn/v1/messages",
+        "https://token.sensenova.cn/v1/messages",
+    ]
+
+
 def test_anthropic_route_overrides_openai_provider_selection() -> None:
     checker = LLMChecker()
 
@@ -129,6 +227,12 @@ def test_anthropic_route_overrides_openai_provider_selection() -> None:
 
 def test_native_protocol_requests() -> None:
     cases = [
+        (
+            ANTHROPIC, "https://api.anthropic.com", "claude-sonnet-test", "anthropic-key",
+            "https://api.anthropic.com/v1/messages",
+            {"model": "claude-sonnet-test", "max_tokens": 16, "messages": [{"role": "user", "content": "hello"}]},
+            "x-api-key",
+        ),
         (
             OPENAI_RESPONSES, "https://api.openai.com/v1", "gpt-4.1-mini", "sk-test",
             "https://api.openai.com/v1/responses",

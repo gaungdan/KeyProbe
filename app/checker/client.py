@@ -25,6 +25,7 @@ from app.services.url_builder import (
     anthropic_test_urls,
     bedrock_model_urls,
     bedrock_test_urls,
+    full_url_model_urls,
     gemini_model_urls,
     gemini_test_urls,
     openai_model_urls,
@@ -65,8 +66,8 @@ class LLMChecker:
             )
 
         effective_provider = self._effective_provider(provider, base_url)
-        urls = (
-            [models_url.strip() or base_url.strip()]
+        urls = [models_url.strip()] if models_url.strip() else (
+            full_url_model_urls(base_url)
             if url_mode == "full"
             else self._model_urls(effective_provider, base_url)
         )
@@ -204,11 +205,25 @@ class LLMChecker:
 
         if result.status in {CheckStatus.INVALID_KEY, CheckStatus.NETWORK_ERROR, CheckStatus.UNKNOWN} \
                 and is_anthropic_provider(effective_provider):
-            self._log("Anthropic 鉴权测试失败，尝试 OpenAI 兼容鉴权...")
-            fallback_urls = openai_test_urls(base_url) if url_mode == "auto" else urls
-            fallback = await self._do_test_model(
-                OPENAI_COMPATIBLE, api_key, model, timeout, url_mode, fallback_urls, model_count
-            )
+            if result.status == CheckStatus.INVALID_KEY:
+                self._log("Anthropic 鉴权测试失败，尝试 OpenAI 兼容鉴权并保留 Anthropic 请求格式...")
+                fallback_urls = urls
+                fallback = await self._do_test_model(
+                    effective_provider,
+                    api_key,
+                    model,
+                    timeout,
+                    url_mode,
+                    fallback_urls,
+                    model_count,
+                    auth_provider=OPENAI_COMPATIBLE,
+                )
+            else:
+                self._log("Anthropic 接口测试失败，尝试 OpenAI 兼容接口...")
+                fallback_urls = openai_test_urls(base_url) if url_mode == "auto" else urls
+                fallback = await self._do_test_model(
+                    OPENAI_COMPATIBLE, api_key, model, timeout, url_mode, fallback_urls, model_count
+                )
             if fallback.status != CheckStatus.INVALID_KEY or fallback.latency_ms is not None:
                 fallback.provider = effective_provider
                 return fallback
@@ -224,13 +239,15 @@ class LLMChecker:
         url_mode: UrlMode,
         urls: list[str],
         model_count: int,
+        auth_provider: str | None = None,
     ) -> CheckResult:
         body = self._body(provider, model)
+        header_provider = auth_provider or provider
         last_result: CheckResult | None = None
 
         async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
             for url in urls:
-                headers = self._headers(provider, api_key, "POST", url, body)
+                headers = self._headers(header_provider, api_key, "POST", url, body)
                 self._log(f"请求 POST {url}")
                 started = perf_counter()
                 try:

@@ -3,6 +3,18 @@
 from collections.abc import Iterable
 from urllib.parse import quote, urlparse, urlunparse
 
+KNOWN_COMPAT_SUFFIXES = (
+    "/api/claudecode",
+    "/api/anthropic",
+    "/apps/anthropic",
+    "/api/coding",
+    "/claudecode",
+    "/anthropic",
+    "/step_plan",
+    "/coding",
+    "/claude",
+)
+
 
 def normalize_base_url(base_url: str) -> str:
     """Normalize user input while preserving the path they provided."""
@@ -36,11 +48,43 @@ def strip_known_protocol_suffix(base_url: str) -> str:
     """Remove route suffixes that may only apply to chat/message endpoints."""
 
     base = normalize_base_url(base_url)
+    original = base
     lowered = base.lower()
-    for suffix in ("/anthropic/v1", "/anthropic", "/claude/v1", "/claude"):
+    version_suffix = ""
+    if ends_with_version_segment(base):
+        index = base.rfind("/")
+        version_suffix = base[index:]
+        base = base[:index]
+        lowered = base.lower()
+    for suffix in KNOWN_COMPAT_SUFFIXES:
         if lowered.endswith(suffix):
-            return base[: -len(suffix)]
-    return base
+            return base[: -len(suffix)] + version_suffix
+    return original
+
+
+def ends_with_version_segment(base_url: str) -> bool:
+    """Return whether the URL path ends with an OpenAI-style /v{N} segment."""
+
+    last = normalize_base_url(base_url).rsplit("/", 1)[-1]
+    return len(last) > 1 and last[0].lower() == "v" and last[1:].isdigit()
+
+
+def full_url_model_urls(full_url: str) -> list[str]:
+    """Derive model-list URLs from a full request URL."""
+
+    url = normalize_base_url(full_url)
+    lowered = url.lower()
+    marker = "/v1/"
+    if marker in lowered:
+        index = lowered.find(marker)
+        return [url[:index] + "/v1/models"]
+
+    if "/" in url.removeprefix("https://").removeprefix("http://"):
+        root = url.rsplit("/", 1)[0]
+        if "://" in root and root.rsplit("://", 1)[-1]:
+            return [join_url(root, "/v1/models")]
+
+    return []
 
 
 def openai_model_urls(base_url: str) -> list[str]:
@@ -48,6 +92,12 @@ def openai_model_urls(base_url: str) -> list[str]:
 
     Third-party proxies may expose the endpoint at /v1/models or /models.
     """
+
+    if ends_with_version_segment(base_url):
+        urls = [join_url(base_url, "/models")]
+        if not normalize_base_url(base_url).lower().endswith("/v1"):
+            urls.append(join_url(base_url, "/v1/models"))
+        return unique_urls(urls)
 
     return unique_urls([
         join_url(base_url, "/v1/models"),

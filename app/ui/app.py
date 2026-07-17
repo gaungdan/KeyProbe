@@ -205,9 +205,9 @@ class KeyProbeApp(ctk.CTk):
         if provider in PROVIDER_OPTIONS:
             self._set_provider(provider, source="config")
         if cfg.url_mode == "auto":
-            self.url_mode_switch.select()
-        else:
             self.url_mode_switch.deselect()
+        else:
+            self.url_mode_switch.select()
         self._update_url_mode_label()
         if cfg.model:
             self._models = [cfg.model]
@@ -222,7 +222,7 @@ class KeyProbeApp(ctk.CTk):
 
     # ---------- 表单读取 ----------
     def _url_mode(self) -> UrlMode:
-        return "auto" if self.url_mode_switch.get() else "full"
+        return "full" if self.url_mode_switch.get() else "auto"
 
     def _timeout(self) -> int:
         raw = self.timeout_entry.get().strip()
@@ -289,9 +289,9 @@ class KeyProbeApp(ctk.CTk):
 
     def _update_url_mode_label(self) -> None:
         if self.url_mode_switch.get():
-            self.url_mode_label.configure(text="自动拼接接口后缀")
-        else:
             self.url_mode_label.configure(text="使用完整地址（不拼接）")
+        else:
+            self.url_mode_label.configure(text="自动拼接接口后缀")
         self._update_curl_preview()
 
     def _toggle_key_visible(self) -> None:
@@ -348,8 +348,15 @@ class KeyProbeApp(ctk.CTk):
         )
         if result.skipped_count:
             self.logger.info(f"已跳过 {result.skipped_count} 个不完整或不支持的配置")
+        if labels:
+            first_label = labels[0]
+            self.cc_switch_menu.set(first_label)
+            self._load_cc_switch_provider(first_label, auto_fetch=True)
 
     def _on_cc_switch_provider_selected(self, choice: str) -> None:
+        self._load_cc_switch_provider(choice, auto_fetch=True)
+
+    def _load_cc_switch_provider(self, choice: str, *, auto_fetch: bool) -> None:
         provider = self._cc_switch_providers.get(choice)
         if provider is None:
             return
@@ -358,9 +365,9 @@ class KeyProbeApp(ctk.CTk):
         self._set_entry(self.base_url_entry, provider.base_url)
         self._set_entry(self.api_key_entry, provider.api_key)
         if provider.url_mode == "auto":
-            self.url_mode_switch.select()
-        else:
             self.url_mode_switch.deselect()
+        else:
+            self.url_mode_switch.select()
         self._set_provider(provider.provider, source="cc_switch")
         self._models = [provider.model]
         self.model_menu.configure(values=self._models)
@@ -371,6 +378,17 @@ class KeyProbeApp(ctk.CTk):
         self.logger.info(
             f"已加载 CC Switch 配置：{provider.display_name}，默认模型：{provider.model}"
         )
+        if auto_fetch:
+            self._queue_fetch_models()
+
+    def _queue_fetch_models(self) -> None:
+        self.after(100, self._fetch_models_when_idle)
+
+    def _fetch_models_when_idle(self) -> None:
+        if self.is_processing:
+            self._queue_fetch_models()
+            return
+        self._on_fetch_models()
 
     def _on_fetch_models(self) -> None:
         if self.is_processing:
