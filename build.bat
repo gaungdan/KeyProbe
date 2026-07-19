@@ -39,7 +39,7 @@ echo [OK] 清理完成
 
 echo.
 echo [4/5] 开始打包...
-pyinstaller --onefile --windowed --name "KeyProbe" --add-data "config.json;." --distpath "./dist" --workpath "./build" --specpath "./build" main.py
+pyinstaller --clean --onefile --windowed --name "KeyProbe" --add-data "config.json;." --distpath "./dist" --workpath "./build" --specpath "./build" main.py
 
 echo.
 echo [5/5] 检查打包结果...

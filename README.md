@@ -101,9 +101,11 @@ Bedrock 的 API Key 输入框可填 Bedrock API Key（按 Bearer 认证）；若
 方式二：手动调用 PyInstaller。
 
 ```powershell
-pip install pyinstaller
-pyinstaller --noconfirm --onefile --windowed --name KeyProbe --distpath ./dist --workpath ./build --specpath ./build main.py
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+pyinstaller --noconfirm --clean --onefile --windowed --name KeyProbe --distpath ./dist --workpath ./build --specpath ./build main.py
 ```
+
+`--clean` 用于清除 PyInstaller 缓存并移除临时文件，避免命中旧的构建缓存导致产物未更新。`requirements.txt` 已包含 `pyinstaller`，无需单独安装。
 
 生成文件位于 `dist\KeyProbe.exe`。`config.json` 不打包进 exe，程序启动时若不存在则使用默认配置并在运行时按需写入。
 
