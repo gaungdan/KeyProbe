@@ -1,0 +1,88 @@
+name: Build Windows EXE and publish to Gitee Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.20.0
+
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          pyinstaller --onefile --windowed --name KeyProbe \
+            --distpath ./dist --workpath ./build --specpath ./build \
+            main.py
+          ls -la dist/
+
+      - name: Resolve tag name
+        shell: bash
+        id: tag
+        run: echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload exe to Gitee Release
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: ${{ secrets.GITEE_OWNER }}
+          GITEE_REPO: ${{ secrets.GITEE_REPO }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -e
+
+          if [ -z "$GITEE_TOKEN" ] || [ -z "$GITEE_OWNER" ] || [ -z "$GITEE_REPO" ]; then
+            echo "::error::Gitee secrets (GITEE_TOKEN / GITEE_OWNER / GITEE_REPO) are not configured."
+            exit 1
+          fi
+
+          echo "Looking up release for tag: $TAG"
+          RELEASE_ID=$(curl -sS -G \
+            "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases" \
+            --data-urlencode "access_token=${GITEE_TOKEN}" \
+            | jq -r ".[] | select(.tag_name == \"${TAG}\") | .id" | head -n1)
+
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
+            echo "No release found for tag $TAG, creating one..."
+            RELEASE_ID=$(curl -sS -X POST \
+              "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases" \
+              --data-urlencode "access_token=${GITEE_TOKEN}" \
+              --data-urlencode "tag_name=${TAG}" \
+              --data-urlencode "name=${TAG}" \
+              --data-urlencode "body=Auto release ${TAG} built by GitHub Actions" \
+              --data-urlencode "target_commitish=master" \
+              | jq -r '.id')
+            if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
+              echo "::error::Failed to create Gitee release for tag $TAG"
+              exit 1
+            fi
+          fi
+          echo "Gitee release id: $RELEASE_ID"
+
+          echo "Uploading dist/KeyProbe.exe to release $RELEASE_ID..."
+          curl -sS -X POST \
+            "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${RELEASE_ID}/attach_files" \
+            --data-urlencode "access_token=${GITEE_TOKEN}" \
+            -F "name=KeyProbe.exe" \
+            -F "file=@dist/KeyProbe.exe" \
+            | jq .
+          echo "Done."
