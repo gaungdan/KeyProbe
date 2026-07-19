@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -35,8 +35,8 @@ jobs:
             main.py
           ls -la dist/
 
-      - name: Upload exe as workflow artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload exe to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: KeyProbe-exe
-          path: dist/KeyProbe.exe
+          files: dist/KeyProbe.exe
+          generate_release_notes: true
