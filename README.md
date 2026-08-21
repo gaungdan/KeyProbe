@@ -132,4 +132,4 @@ pyinstaller --noconfirm --clean --onefile --windowed --name KeyProbe --distpath 
 ## 安全说明
 
 - 日志和 cURL 预览对 API Key 脱敏显示（保留首尾若干字符）。
-- `config.json` 会明文保存 `base_url`、`api_key`、`url_mode`、`provider`、`model`、`timeout`、`theme_mode`，请勿提交到公共仓库。
+- `config.json` 只保存 `base_url`、`url_mode`、`provider`、`model`、`timeout`、`theme_mode`，**API Key 永不落盘**：每次启动需手动输入，或通过「导入 CC Switch 配置」从本地 CC Switch 数据库读取。

@@ -25,6 +25,7 @@ from app.services.url_builder import (
     anthropic_test_urls,
     bedrock_model_urls,
     bedrock_test_urls,
+    build_request_body,
     full_url_model_urls,
     gemini_model_urls,
     gemini_test_urls,
@@ -46,6 +47,16 @@ class LLMChecker:
     ) -> None:
         self._log = log or (lambda message: None)
         self._transport = transport
+
+    async def close(self) -> None:
+        """No-op, kept for API compatibility.
+
+        The checker no longer keeps a shared AsyncClient. Every operation opens
+        a fresh client inside its own event-loop run and closes it before the
+        loop is torn down. Sharing one client across ``asyncio.run()`` calls
+        would bind its connection pool to an already-closed loop, causing
+        ``RuntimeError: Event loop is closed`` (httpcore/anyio cleanup).
+        """
 
     async def fetch_models(
         self,
@@ -106,6 +117,9 @@ class LLMChecker:
         urls: list[str],
     ) -> ModelFetchResult:
         last_error = ""
+        # 每次调用使用独立的 AsyncClient，并在同一事件循环内关闭。GUI 在后台线程里用
+        # asyncio.run() 调用这里，每次运行都会新建并销毁事件循环；若跨循环复用共享
+        # client，httpx/httpcore 清理旧连接时会抛出 "Event loop is closed"。
         async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
             for url in urls:
                 headers = self._headers(provider, api_key, "GET", url)
@@ -151,9 +165,9 @@ class LLMChecker:
             return ModelFetchResult(
                 provider=provider,
                 request_url=urls[-1] if urls else "",
-            error_message=last_error or "未获取到模型列表",
-            raw={},
-        )
+                error_message=last_error or "未获取到模型列表",
+                raw={},
+            )
 
     async def test_model(
         self,
@@ -245,6 +259,8 @@ class LLMChecker:
         header_provider = auth_provider or provider
         last_result: CheckResult | None = None
 
+        # 与 _do_fetch_models 同理：独立 AsyncClient，随事件循环创建/销毁，避免
+        # 跨 asyncio.run() 复用连接池导致 "Event loop is closed"。
         async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
             for url in urls:
                 headers = self._headers(header_provider, api_key, "POST", url, body)
@@ -309,13 +325,13 @@ class LLMChecker:
                     raw=self._safe_json(response) or response.text[:2000],
                 )
 
-        return last_result or CheckResult(
-            status=CheckStatus.UNKNOWN,
-            provider=provider,
-            selected_model=model,
-            model_count=model_count,
-            error_message="检测失败",
-        )
+            return last_result or CheckResult(
+                status=CheckStatus.UNKNOWN,
+                provider=provider,
+                selected_model=model,
+                model_count=model_count,
+                error_message="检测失败",
+            )
 
     def _model_urls(self, provider: str, base_url: str) -> list[str]:
         if is_anthropic_provider(provider):
@@ -376,33 +392,7 @@ class LLMChecker:
         }
 
     def _body(self, provider: str, model: str) -> dict[str, Any]:
-        if is_anthropic_provider(provider):
-            return {
-                "model": model,
-                "max_tokens": 16,
-                "messages": [{"role": "user", "content": "hello"}],
-            }
-        if provider == GOOGLE_GEMINI:
-            return {
-                "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
-                "generationConfig": {"temperature": 0, "maxOutputTokens": 16},
-            }
-        if provider == AMAZON_BEDROCK:
-            return {
-                "messages": [{"role": "user", "content": [{"text": "hello"}]}],
-                "inferenceConfig": {"maxTokens": 16, "temperature": 0},
-            }
-        if provider == OPENAI_RESPONSES:
-            return {"model": model, "input": "hello", "max_output_tokens": 16, "temperature": 0}
-        return {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "hello"},
-            ],
-            "temperature": 0,
-            "max_tokens": 16,
-        }
+        return build_request_body(provider, model)
 
     def _parse_models(self, response: httpx.Response, provider: str = "") -> list[str]:
         payload = self._safe_json(response)
@@ -441,17 +431,17 @@ class LLMChecker:
                 out.append(item.strip())
 
     def _classify_error(self, response: httpx.Response) -> CheckStatus:
-        text = response.text.lower()
-        if response.status_code in {401, 403}:
-            return CheckStatus.INVALID_KEY
         if response.status_code == 429:
             return CheckStatus.RATE_LIMITED
-        if response.status_code == 402 or any(
-            keyword in text for keyword in ["insufficient", "balance", "quota", "credit"]
-        ):
-            return CheckStatus.INSUFFICIENT_BALANCE
+        if response.status_code in {401, 403}:
+            return CheckStatus.INVALID_KEY
         if response.status_code >= 500:
             return CheckStatus.SERVER_ERROR
+        if response.status_code in {402, 409} or any(
+            keyword in self._extract_error(response).lower()
+            for keyword in ("insufficient", "balance", "quota", "credit")
+        ):
+            return CheckStatus.INSUFFICIENT_BALANCE
         return CheckStatus.UNKNOWN
 
     def _extract_error(self, response: httpx.Response) -> str:

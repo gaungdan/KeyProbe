@@ -290,3 +290,28 @@ def test_bedrock_sigv4_uses_runtime_service_and_session_token() -> None:
     )
     assert "bedrock-runtime" in headers["Authorization"]
     assert headers["X-Amz-Security-Token"] == "session"
+
+
+def test_asyncio_run_reuse_same_checker() -> None:
+    """Regression: repeated asyncio.run() on the same checker must not raise
+    "Event loop is closed" (previously caused by sharing a single httpx.AsyncClient
+    across event loops)."""
+    request_count: list[int] = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_count[0] += 1
+        return httpx.Response(200, json={"data": [{"id": "gpt-test"}]})
+
+    checker = LLMChecker(transport=httpx.MockTransport(handler))
+
+    async def run():
+        return await checker.fetch_models(
+            provider=OPENAI_COMPATIBLE, api_key="sk-test", timeout=5,
+            url_mode="auto", base_url="https://test.example.com/v1",
+        )
+
+    for _ in range(3):
+        result = asyncio.run(run())
+        assert result.models == ["gpt-test"]
+
+    assert request_count[0] == 3

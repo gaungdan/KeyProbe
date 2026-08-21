@@ -20,9 +20,9 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
 
 
 def save_config(config: AppConfig, path: Path = CONFIG_PATH) -> None:
-    """Save config to disk."""
+    """Save config to disk (API key excluded — never persisted)."""
 
     path.write_text(
-        config.model_dump_json(indent=2),
+        config.model_dump_json(indent=2, exclude={"api_key"}),
         encoding="utf-8",
     )

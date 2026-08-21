@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import traceback
 import threading
 from pathlib import Path
 
@@ -23,13 +24,7 @@ from app.services.providers import (
     is_anthropic_provider,
     normalize_provider,
 )
-from app.services.url_builder import (
-    anthropic_test_urls,
-    bedrock_test_urls,
-    gemini_test_urls,
-    openai_test_urls,
-    responses_test_urls,
-)
+from app.services.url_builder import build_request_body, pick_test_url
 from app.ui.log_panel import LogPanel
 from app.ui.result_panel import ResultPanel
 from app.utils.security import mask_api_key
@@ -52,7 +47,6 @@ class KeyProbeApp(ctk.CTk):
         self._cc_switch_providers: dict[str, CCSwitchProvider] = {}
         self._selected_cc_switch_provider: CCSwitchProvider | None = None
         self._provider_source = "auto"
-        self._suppress_provider_change = False
 
         self._setup_window()
         self._create_widgets()
@@ -189,6 +183,11 @@ class KeyProbeApp(ctk.CTk):
         )
         self.save_btn.pack(side="left", padx=5)
 
+        # 加载进度条（操作进行中显示）
+        self.progress_bar = ctk.CTkProgressBar(self, height=8, mode="indeterminate")
+        self.progress_bar.pack(fill="x", padx=20, pady=(0, 2))
+        self.progress_bar.pack_forget()
+
         # 结果区与日志区
         self.result_panel = ResultPanel(self)
         self.result_panel.pack(fill="x", padx=20, pady=6)
@@ -213,7 +212,7 @@ class KeyProbeApp(ctk.CTk):
     def _apply_config(self) -> None:
         cfg = self.config_data
         self._set_entry(self.base_url_entry, cfg.base_url)
-        self._set_entry(self.api_key_entry, cfg.api_key)
+        # API Key 不持久化，启动时不回填，需手动输入
         self._set_entry(self.timeout_entry, str(cfg.timeout))
         provider = normalize_provider(cfg.provider)
         if provider in PROVIDER_OPTIONS:
@@ -260,8 +259,6 @@ class KeyProbeApp(ctk.CTk):
         )
 
     def _on_provider_change(self, choice: str) -> None:
-        if self._suppress_provider_change:
-            return
         self._provider_source = "manual"
         self._selected_cc_switch_provider = None
         self._update_curl_preview()
@@ -294,11 +291,11 @@ class KeyProbeApp(ctk.CTk):
             self._set_provider(provider, source="auto")
 
     def _set_provider(self, provider: str, *, source: str) -> None:
-        self._suppress_provider_change = True
-        try:
-            self.provider_menu.set(provider)
-        finally:
-            self._suppress_provider_change = False
+        # Temporarily remove command to avoid callback during programmatic set
+        cmd = self.provider_menu._command
+        self.provider_menu.configure(command=lambda _: None)
+        self.provider_menu.set(provider)
+        self.provider_menu.configure(command=cmd)
         self._provider_source = source
 
     def _update_url_mode_label(self) -> None:
@@ -325,6 +322,12 @@ class KeyProbeApp(ctk.CTk):
         self.cc_switch_menu.configure(
             state="disabled" if locked or not self._cc_switch_providers else "normal"
         )
+        if locked:
+            self.progress_bar.pack(fill="x", padx=20, pady=(0, 2))
+            self.progress_bar.start()
+        else:
+            self.progress_bar.stop()
+            self.progress_bar.pack_forget()
 
     def _on_import_cc_switch(self) -> None:
         if self.is_processing:
@@ -338,8 +341,9 @@ class KeyProbeApp(ctk.CTk):
             self.logger.info("========== 导入 CC Switch 配置 ==========")
             result = load_cc_switch_providers()
             self.after(0, lambda: self._apply_cc_switch_import(result))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.logger.error(f"导入 CC Switch 配置失败：{exc}")
+            self.logger.error(traceback.format_exc())
         finally:
             self.after(0, lambda: self._lock(False))
 
@@ -393,20 +397,19 @@ class KeyProbeApp(ctk.CTk):
             f"已加载 CC Switch 配置：{provider.display_name}，默认模型：{provider.model}"
         )
         if auto_fetch:
-            self._queue_fetch_models()
-
-    def _queue_fetch_models(self) -> None:
-        self.after(100, self._fetch_models_when_idle)
-
-    def _fetch_models_when_idle(self) -> None:
-        if self.is_processing:
-            self._queue_fetch_models()
-            return
-        self._on_fetch_models()
+            if self.is_processing:
+                # 导入刚完成，不可能在处理中，但以防万一
+                self.after(100, self._on_fetch_models)
+            else:
+                self._on_fetch_models()
 
     def _on_fetch_models(self) -> None:
         if self.is_processing:
             self.logger.warning("正在处理中，请稍候...")
+            return
+        err = self._validate_inputs()
+        if err:
+            self.logger.error(err)
             return
         self._select_provider_from_base_url()
         self._lock(True)
@@ -426,8 +429,9 @@ class KeyProbeApp(ctk.CTk):
                 )
             )
             self.after(0, lambda: self._apply_models_result(result))
-        except Exception as exc:  # noqa: BLE001
-            self.logger.error(f"异常: {exc}")
+        except Exception as exc:
+            self.logger.error(f"获取模型异常: {exc}")
+            self.logger.error(traceback.format_exc())
         finally:
             self.after(0, lambda: self._lock(False))
 
@@ -450,6 +454,10 @@ class KeyProbeApp(ctk.CTk):
         if self.is_processing:
             self.logger.warning("正在处理中，请稍候...")
             return
+        err = self._validate_inputs()
+        if err:
+            self.logger.error(err)
+            return
         self._select_provider_from_base_url()
         self._lock(True)
         threading.Thread(target=self._test_worker, daemon=True).start()
@@ -471,8 +479,9 @@ class KeyProbeApp(ctk.CTk):
                 )
             )
             self.after(0, lambda: self._apply_test_result(result))
-        except Exception as exc:  # noqa: BLE001
-            self.logger.error(f"异常: {exc}")
+        except Exception as exc:
+            self.logger.error(f"测试接口异常: {exc}")
+            self.logger.error(traceback.format_exc())
         finally:
             self.after(0, lambda: self._lock(False))
 
@@ -486,6 +495,28 @@ class KeyProbeApp(ctk.CTk):
     def _current_models(self) -> list[str]:
         return self._models
 
+    def _validate_inputs(self) -> str | None:
+        """Validate form inputs before making API calls. Returns error message or None."""
+        base_url = self.base_url_entry.get().strip()
+        if not base_url:
+            return "接口地址不能为空"
+        if "://" not in base_url:
+            return "接口地址格式不正确，请包含协议（如 https://）"
+
+        timeout = self.timeout_entry.get().strip()
+        if timeout:
+            try:
+                val = int(timeout)
+                if val < 1 or val > 300:
+                    return "超时时间必须在 1～300 秒之间"
+            except ValueError:
+                return "超时时间必须为数字"
+
+        if not self.api_key_entry.get().strip():
+            return "密钥不能为空"
+
+        return None
+
     def _on_save(self) -> None:
         self._select_provider_from_base_url()
         cfg = self._collect_config()
@@ -493,7 +524,7 @@ class KeyProbeApp(ctk.CTk):
             save_config(cfg)
             self.config_data = cfg
             self.logger.success("配置已保存到 config.json")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.logger.error(f"保存失败: {exc}")
 
     # ---------- cURL 预览 ----------
@@ -509,39 +540,24 @@ class KeyProbeApp(ctk.CTk):
             self.result_panel.set_curl("")
             return
 
-        if self._url_mode() == "full":
-            url = base_url
-        elif is_anthropic_provider(provider):
-            url = anthropic_test_urls(base_url)[0]
-        elif provider == AMAZON_BEDROCK:
-            url = bedrock_test_urls(base_url, model)[0]
-        elif provider == GOOGLE_GEMINI:
-            url = gemini_test_urls(base_url, model)[0]
-        elif provider == OPENAI_RESPONSES:
-            url = responses_test_urls(base_url)[0]
-        else:
-            url = openai_test_urls(base_url)[0]
-
-        if is_anthropic_provider(provider):
-            auth = f'-H "x-api-key: {api_key}" -H "anthropic-version: 2023-06-01"'
-            body = {"model": model, "max_tokens": 16, "messages": [{"role": "user", "content": "hello"}]}
-        elif provider == GOOGLE_GEMINI:
-            auth = f'-H "x-goog-api-key: {api_key}"'
-            body = {"contents": [{"role": "user", "parts": [{"text": "hello"}]}], "generationConfig": {"maxOutputTokens": 16, "temperature": 0}}
-        elif provider == AMAZON_BEDROCK:
-            auth = f'-H "Authorization: Bearer {api_key}"'
-            body = {"messages": [{"role": "user", "content": [{"text": "hello"}]}], "inferenceConfig": {"maxTokens": 16, "temperature": 0}}
-        elif provider == OPENAI_RESPONSES:
-            auth = f'-H "Authorization: Bearer {api_key}"'
-            body = {"model": model, "input": "hello", "max_output_tokens": 16, "temperature": 0}
-        else:
-            auth = f'-H "Authorization: Bearer {api_key}"'
-            body = {"model": model, "messages": [{"role": "user", "content": "hello"}], "max_tokens": 16}
+        url = pick_test_url(provider, base_url, model, self._url_mode())
+        auth_header = self._curl_auth_header(provider, api_key)
+        body = build_request_body(provider, model)
 
         curl = (
             f"curl -X POST {url} \\\n"
-            f'  {auth} \\\n'
+            f'  {auth_header} \\\n'
             f'  -H "Content-Type: application/json" \\\n'
             f"  -d '{json.dumps(body, ensure_ascii=False)}'"
         )
         self.result_panel.set_curl(curl)
+
+    @staticmethod
+    def _curl_auth_header(provider: str, masked_key: str) -> str:
+        """Return the cURL auth header for the given provider."""
+        p = provider.lower()
+        if "anthropic" in p or "claude" in p or "协议" in p:
+            return f'-H "x-api-key: {masked_key}" -H "anthropic-version: 2023-06-01"'
+        if "gemini" in p:
+            return f'-H "x-goog-api-key: {masked_key}"'
+        return f'-H "Authorization: Bearer {masked_key}"'

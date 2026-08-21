@@ -170,3 +170,62 @@ def bedrock_test_urls(base_url: str, model: str) -> list[str]:
     """Bedrock Runtime InvokeModel endpoint for a foundation model."""
 
     return [join_url(base_url, f"/model/{quote(model, safe='._-')}/invoke")]
+
+
+# ── Shared helpers used by both checker and UI ──────────────────────────
+
+
+def build_request_body(provider: str, model: str) -> dict[str, object]:
+    """Build a minimal request body for the given provider."""
+
+    p = provider.lower()
+    if "anthropic" in p or "claude" in p or "协议" in p:
+        return {
+            "model": model,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+    if "gemini" in p:
+        return {
+            "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 16},
+        }
+    if "bedrock" in p:
+        return {
+            "messages": [{"role": "user", "content": [{"text": "hello"}]}],
+            "inferenceConfig": {"maxTokens": 16, "temperature": 0},
+        }
+    if "responses" in p or "响应" in p:
+        return {"model": model, "input": "hello", "max_output_tokens": 16, "temperature": 0}
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a helpful AI assistant"},
+            {"role": "user", "content": "hello"},
+        ],
+        "temperature": 0,
+        "max_tokens": 16,
+    }
+
+
+def pick_test_url(provider: str, base_url: str, model: str, url_mode: str) -> str:
+    """Return the first test URL for the given provider/mode."""
+
+    from app.services.providers import (
+        AMAZON_BEDROCK,
+        GOOGLE_GEMINI,
+        OPENAI_RESPONSES,
+        is_anthropic_provider,
+    )
+
+    if url_mode == "full":
+        return normalize_base_url(base_url)
+    if is_anthropic_provider(provider):
+        return anthropic_test_urls(base_url)[0]
+    if provider == AMAZON_BEDROCK:
+        return bedrock_test_urls(base_url, model)[0]
+    if provider == GOOGLE_GEMINI:
+        return gemini_test_urls(base_url, model)[0]
+    if provider == OPENAI_RESPONSES:
+        return responses_test_urls(base_url)[0]
+    return openai_test_urls(base_url)[0]
