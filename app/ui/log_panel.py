@@ -1,8 +1,12 @@
-"""日志面板组件：实时日志输出 + 清空。"""
+"""日志面板：实时日志输出 + 清空。"""
 
 from typing import Callable, Optional
 
 import customtkinter as ctk
+
+from app.ui import theme
+from app.ui.widgets import ghost_button
+from app.utils.textbox import fit_to_content, hide_scrollbar
 
 
 class LogPanel(ctk.CTkFrame):
@@ -13,49 +17,53 @@ class LogPanel(ctk.CTkFrame):
         master,
         on_clear: Optional[Callable[[], None]] = None,
     ) -> None:
-        super().__init__(master)
+        super().__init__(master, fg_color="transparent")
         self._on_clear = on_clear
         self._create_widgets()
 
     def _create_widgets(self) -> None:
+        # 页签已经写着「执行日志」，面板内不再重复标题，只留操作
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=15, pady=(10, 0))
-
-        title = ctk.CTkLabel(
+        header.pack(fill="x", padx=theme.GAP_XS, pady=(theme.GAP_XS, theme.GAP_SM))
+        ctk.CTkLabel(
             header,
-            text="执行日志",
-            font=("Helvetica", 15, "bold"),
-        )
-        title.pack(side="left")
-
-        ctk.CTkButton(
+            text=theme.caps("output"),
+            font=theme.mono(9, "bold"),
+            text_color=theme.TEXT_FAINT,
+        ).pack(side="left")
+        ghost_button(
             header,
             text="清空",
-            width=64,
-            height=28,
-            fg_color="#666666",
-            hover_color="#555555",
+            width=60,
+            height=26,
+            font=theme.font(12),
             command=self._clear,
-        ).pack(side="right", padx=4)
+        ).pack(side="right")
 
         self.log_text = ctk.CTkTextbox(
             self,
-            font=("Consolas", 13),
-            fg_color="#1E1E1E",
-            text_color="#E0E0E0",
+            font=theme.mono(12),
+            fg_color=theme.WELL,
+            text_color=theme.TEXT_PRIMARY,
+            border_width=0,
         )
-        self.log_text.pack(fill="both", expand=True, padx=15, pady=10)
+        # 不 expand：高度随日志条数撑开，交给外层滚动条统一滚动。
+        self.log_text.pack(fill="x", padx=theme.GAP_XS, pady=(0, theme.GAP_XS))
+        hide_scrollbar(self.log_text)
+        fit_to_content(self.log_text)
 
     def log(self, message: str) -> None:
         """追加一行日志并滚动到底部。"""
 
         self.log_text.insert("end", message + "\n")
         self.log_text.see("end")
+        fit_to_content(self.log_text)
 
     def clear(self) -> None:
         """清空文本框。"""
 
         self.log_text.delete("1.0", "end")
+        fit_to_content(self.log_text)
 
     def _clear(self) -> None:
         self.clear()

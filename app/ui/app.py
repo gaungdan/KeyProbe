@@ -4,16 +4,16 @@ import asyncio
 import json
 import traceback
 import threading
-from pathlib import Path
 
 import customtkinter as ctk
-from PIL import Image
 
+from app.checker.auditor import ModelAuditor
 from app.checker.client import LLMChecker
+from app.models.audit import AUDIT_LEVEL_BY_LABEL, AUDIT_LEVEL_LABELS, AuditReport
 from app.models.check import CheckStatus
-from app.models.config import AppConfig, UrlMode
+from app.models.config import AppConfig, AuditLevel, UrlMode
 from app.services.cc_switch import CCSwitchImportResult, CCSwitchProvider, load_cc_switch_providers
-from app.services.config_store import load_config, save_config
+from app.services.config_store import load_config
 from app.services.logger_service import LoggerService
 from app.services.providers import (
     AMAZON_BEDROCK,
@@ -25,8 +25,18 @@ from app.services.providers import (
     normalize_provider,
 )
 from app.services.url_builder import build_request_body, pick_test_url
+from app.ui.audit_panel import AuditPanel
 from app.ui.log_panel import LogPanel
 from app.ui.result_panel import ResultPanel
+from app.ui.widgets import (
+    ComboBox,
+    OptionMenu,
+    ghost_button,
+    load_icon,
+    primary_button,
+    signal_button,
+)
+from app.ui import theme
 from app.utils.security import mask_api_key
 
 MODEL_PLACEHOLDER = "（先获取模型）"
@@ -42,11 +52,13 @@ class KeyProbeApp(ctk.CTk):
         self.config_data: AppConfig = load_config()
         self.logger = LoggerService()
         self.checker = LLMChecker(log=self._checker_log)
+        self.auditor = ModelAuditor(log=self._checker_log)
         self.is_processing = False
         self._models: list[str] = []
         self._cc_switch_providers: dict[str, CCSwitchProvider] = {}
         self._selected_cc_switch_provider: CCSwitchProvider | None = None
         self._provider_source = "auto"
+        self._model_source = "手动输入"
 
         self._setup_window()
         self._create_widgets()
@@ -55,158 +67,285 @@ class KeyProbeApp(ctk.CTk):
             lambda line: self.after(0, self.log_panel.log, line)
         )
 
-    _ASSETS = Path(__file__).resolve().parent / "assets"
-
-    @staticmethod
-    def _load_icon(name: str, size: int = 20) -> ctk.CTkImage:
-        base = KeyProbeApp._ASSETS
-        light = Image.open(base / f"{name}-light.png").resize((size, size), Image.LANCZOS)
-        dark = Image.open(base / f"{name}.png").resize((size, size), Image.LANCZOS)
-        return ctk.CTkImage(light_image=light, dark_image=dark, size=(size, size))
-
     # ---------- 窗口与组件 ----------
+    WINDOW_MIN_WIDTH = 980
+    WINDOW_MIN_HEIGHT = 780
+
+    # 表单标签列固定宽度，让所有输入控件左边缘严格对齐
+    LABEL_COL_WIDTH = 84
+    SUB_LABEL_COL_WIDTH = 52
+    PAD_X = theme.GAP_XL
+    ROW_PAD_Y = 6
+
     def _setup_window(self) -> None:
         self.title("KeyProbe - LLM Key Checker")
-        self.geometry("1000x880")
-        self.minsize(900, 760)
+        # 表单压到 5 行后首屏能同时容纳日志区，默认高度给到 880 而不是贴着最小值
+        self.geometry(f"{self.WINDOW_MIN_WIDTH}x880")
+        self.minsize(self.WINDOW_MIN_WIDTH, self.WINDOW_MIN_HEIGHT)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
+        # 窗口底色比面板更深一层，面板才会显得是「装上去的」而不是同一块平面
+        self.configure(fg_color=theme.INK)
 
     def _create_widgets(self) -> None:
-        # 标题栏
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=20, pady=(15, 5))
+        # 可滚动主内容区：内容超出窗口高度时自动出现滚动条，底部内容可滚动查看
+        self.content = ctk.CTkScrollableFrame(
+            self,
+            fg_color="transparent",
+            scrollbar_button_color=theme.EDGE,
+            scrollbar_button_hover_color=theme.SIGNAL_DIM,
+        )
+        self.content.pack(fill="both", expand=True)
+
+        # 标题栏：等宽字标，Key 用正文色、Probe 用信号色，
+        # 一眼就是「仪器」而不是「后台系统」。Tk 的 Label 无法双色，故拆两个。
+        # 说明文字与字标同行，anchor="s" 让它压在字标基线上而不是垂直居中。
+        header = ctk.CTkFrame(self.content, fg_color="transparent")
+        header.pack(fill="x", padx=self.PAD_X, pady=(theme.GAP_SM, 2))
+        ctk.CTkLabel(
+            header, text="Key", font=theme.mono(24, "bold"), text_color=theme.TEXT_PRIMARY
+        ).pack(side="left")
+        ctk.CTkLabel(
+            header, text="Probe", font=theme.mono(24, "bold"), text_color=theme.SIGNAL
+        ).pack(side="left")
         ctk.CTkLabel(
             header,
-            text="KeyProbe - LLM Key Checker",
-            font=("Helvetica", 24, "bold"),
-        ).pack()
+            text="探测接口连通性，核对模型是否名实相符",
+            font=theme.font(12),
+            text_color=theme.TEXT_MUTED,
+            anchor="w",
+        ).pack(side="left", anchor="s", padx=(theme.GAP_MD, 0), pady=(0, 4))
 
-        # 配置表单
-        form = ctk.CTkFrame(self)
-        form.pack(fill="x", padx=20, pady=10)
-        form.grid_columnconfigure(1, weight=1)
+        # 配置表单：短字段两两并排，行数从 9 压到 5，首屏不再需要滚动
+        form = ctk.CTkFrame(self.content, fg_color=theme.PANEL)
+        form.pack(fill="x", padx=self.PAD_X, pady=(theme.GAP_LG, theme.GAP_MD))
+        form.grid_columnconfigure(0, minsize=self.LABEL_COL_WIDTH)
+        form.grid_columnconfigure(1, weight=1, uniform="field")
+        form.grid_columnconfigure(2, minsize=self.SUB_LABEL_COL_WIDTH)
+        form.grid_columnconfigure(3, weight=1, uniform="field")
 
-        self.base_url_entry = self._form_entry(form, 0, "接口地址", "https://api.openai.com/v1")
+        ctk.CTkLabel(
+            form,
+            text=theme.caps("endpoint"),
+            font=theme.mono(9, "bold"),
+            text_color=theme.TEXT_FAINT,
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=4, sticky="w", padx=theme.GAP_LG,
+               pady=(theme.GAP_LG, theme.GAP_SM))
+
+        # 接口地址与拼接模式同属一个决定，放同一行；开关文字本身就是当前状态说明
+        self._form_label(form, 1, "接口地址")
+        url_row = ctk.CTkFrame(form, fg_color="transparent")
+        url_row.grid(row=1, column=1, columnspan=3, sticky="ew",
+                     padx=theme.GAP_LG, pady=self.ROW_PAD_Y)
+        url_row.grid_columnconfigure(0, weight=1)
+        self.base_url_entry = ctk.CTkEntry(
+            url_row,
+            placeholder_text="https://api.openai.com/v1",
+            height=theme.CONTROL_HEIGHT,
+            font=theme.mono(12),
+            fg_color=theme.SURFACE_INPUT,
+            border_color=theme.EDGE,
+        )
+        self.base_url_entry.grid(row=0, column=0, sticky="ew")
+        self.url_mode_switch = ctk.CTkSwitch(
+            url_row,
+            text="",
+            font=theme.font(12),
+            command=self._update_url_mode_label,
+            width=40,
+            progress_color=theme.SIGNAL,
+        )
+        self.url_mode_switch.grid(row=0, column=1, padx=(theme.GAP_MD, 0))
         self.base_url_entry.bind("<FocusOut>", self._on_base_url_confirmed)
         self.base_url_entry.bind("<Return>", self._on_base_url_confirmed)
         self.base_url_entry.bind("<KeyRelease>", self._on_base_url_typing)
 
-        # URL 模式开关
-        ctk.CTkLabel(form, text="URL 模式", font=("Helvetica", 14)).grid(
-            row=1, column=0, sticky="w", padx=15, pady=8
-        )
-        switch_box = ctk.CTkFrame(form, fg_color="transparent")
-        switch_box.grid(row=1, column=1, sticky="w", padx=15, pady=8)
-        self.url_mode_switch = ctk.CTkSwitch(
-            switch_box, text="", command=self._update_url_mode_label, width=46
-        )
-        self.url_mode_switch.pack(side="left")
-        self.url_mode_label = ctk.CTkLabel(switch_box, text="", font=("Helvetica", 13))
-        self.url_mode_label.pack(side="left", padx=10)
-
-        ctk.CTkLabel(form, text="密钥", font=("Helvetica", 14)).grid(
-            row=2, column=0, sticky="w", padx=15, pady=8
-        )
+        self._form_label(form, 2, "密钥")
         key_frame = ctk.CTkFrame(form, fg_color="transparent")
-        key_frame.grid(row=2, column=1, sticky="ew", padx=15, pady=8)
+        key_frame.grid(row=2, column=1, columnspan=3, sticky="ew",
+                       padx=theme.GAP_LG, pady=self.ROW_PAD_Y)
         key_frame.grid_columnconfigure(0, weight=1)
-        self.api_key_entry = ctk.CTkEntry(key_frame, placeholder_text="sk-...", height=38, show="*")
+        self.api_key_entry = ctk.CTkEntry(
+            key_frame,
+            placeholder_text="sk-...",
+            height=theme.CONTROL_HEIGHT,
+            font=theme.mono(12),
+            fg_color=theme.SURFACE_INPUT,
+            border_color=theme.EDGE,
+            show="*",
+        )
         self.api_key_entry.grid(row=0, column=0, sticky="ew")
         self._api_key_visible = False
-        self._eye_icon = self._load_icon("eye")
-        self._eye_off_icon = self._load_icon("eye-off")
+        self._eye_icon = load_icon("eye")
+        self._eye_off_icon = load_icon("eye-off")
         self.eye_btn = ctk.CTkButton(
-            key_frame, image=self._eye_icon, text="", width=38, height=38,
+            key_frame,
+            image=self._eye_icon,
+            text="",
+            width=theme.CONTROL_HEIGHT,
+            height=theme.CONTROL_HEIGHT,
+            fg_color=theme.NEUTRAL_FILL,
+            hover_color=theme.NEUTRAL_HOVER,
+            border_width=0,
             command=self._toggle_key_visible,
         )
-        self.eye_btn.grid(row=0, column=1, padx=(6, 0))
+        self.eye_btn.grid(row=0, column=1, padx=(theme.GAP_SM, 0))
 
-        # CC Switch 导入
-        ctk.CTkLabel(form, text="CC Switch 配置", font=("Helvetica", 14)).grid(
-            row=3, column=0, sticky="w", padx=15, pady=8
+        # 服务商与模型是一组：先定协议，再定模型，并排比上下分开更贴合心智
+        self._form_label(form, 3, "服务商")
+        self.provider_menu = OptionMenu(
+            form,
+            values=PROVIDER_OPTIONS,
+            height=theme.CONTROL_HEIGHT,
+            font=theme.font(13),
+            command=self._on_provider_change,
         )
-        self.cc_switch_menu = ctk.CTkComboBox(
+        self.provider_menu.grid(row=3, column=1, sticky="ew",
+                                padx=(theme.GAP_LG, 0), pady=self.ROW_PAD_Y)
+
+        self._sub_label(form, 3, "模型")
+        self.model_menu = ComboBox(
+            form,
+            values=[MODEL_PLACEHOLDER],
+            command=self._on_model_selected,
+            readonly=True,
+            height=theme.CONTROL_HEIGHT,
+            font=theme.mono(12),
+        )
+        self.model_menu.grid(row=3, column=3, sticky="ew",
+                             padx=(0, theme.GAP_LG), pady=self.ROW_PAD_Y)
+
+        self._form_label(form, 4, "CC Switch")
+        self.cc_switch_menu = ComboBox(
             form,
             values=[CC_SWITCH_PLACEHOLDER],
-            state="disabled",
+            readonly=True,
+            height=theme.CONTROL_HEIGHT,
+            font=theme.font(13),
             command=self._on_cc_switch_provider_selected,
         )
-        self.cc_switch_menu.grid(row=3, column=1, sticky="ew", padx=15, pady=8)
+        self.cc_switch_menu.grid(row=4, column=1, sticky="ew",
+                                 padx=(theme.GAP_LG, 0), pady=self.ROW_PAD_Y)
+        # 必须先写入占位文字再禁用：disabled 的 Entry 会拒绝 insert，
+        # 若先禁用再 set 会得到一个空白下拉框。
         self.cc_switch_menu.set(CC_SWITCH_PLACEHOLDER)
+        self.cc_switch_menu.configure(state="disabled")
 
-        # 服务商/协议
-        ctk.CTkLabel(form, text="服务商/协议", font=("Helvetica", 14)).grid(
-            row=4, column=0, sticky="w", padx=15, pady=8
+        self._sub_label(form, 4, "超时")
+        timeout_box = ctk.CTkFrame(form, fg_color="transparent")
+        timeout_box.grid(row=4, column=3, sticky="w",
+                         padx=(0, theme.GAP_LG), pady=self.ROW_PAD_Y)
+        self.timeout_entry = ctk.CTkEntry(
+            timeout_box,
+            placeholder_text="30",
+            width=72,
+            height=theme.CONTROL_HEIGHT,
+            font=theme.mono(12),
+            fg_color=theme.SURFACE_INPUT,
+            border_color=theme.EDGE,
         )
-        self.provider_menu = ctk.CTkOptionMenu(
-            form, values=PROVIDER_OPTIONS, command=self._on_provider_change
-        )
-        self.provider_menu.grid(row=4, column=1, sticky="ew", padx=15, pady=8)
+        self.timeout_entry.pack(side="left")
+        ctk.CTkLabel(
+            timeout_box, text="秒", font=theme.mono(11), text_color=theme.TEXT_FAINT
+        ).pack(side="left", padx=(theme.GAP_SM, 0))
 
-        self.timeout_entry = self._form_entry(form, 5, "超时时间（秒）", "30")
+        self._form_label(form, 5, "体检深度")
+        audit_box = ctk.CTkFrame(form, fg_color="transparent")
+        audit_box.grid(row=5, column=1, columnspan=3, sticky="ew",
+                       padx=theme.GAP_LG, pady=(self.ROW_PAD_Y, theme.GAP_LG))
+        self.audit_level_menu = OptionMenu(
+            audit_box,
+            values=list(AUDIT_LEVEL_LABELS.values()),
+            width=170,
+            height=theme.CONTROL_HEIGHT,
+            font=theme.font(13),
+        )
+        self.audit_level_menu.pack(side="left")
+        ctk.CTkLabel(
+            audit_box,
+            text="每档都会真实调用模型，档位越深消耗的 token 越多",
+            font=theme.font(12),
+            text_color=theme.TEXT_FAINT,
+        ).pack(side="left", padx=theme.GAP_MD)
 
-        # 模型
-        ctk.CTkLabel(form, text="模型", font=("Helvetica", 14)).grid(
-            row=6, column=0, sticky="w", padx=15, pady=8
+        # 操作按钮：主操作靠右，与阅读动线一致。两个彩色实心按钮在近黑底上最先被看到。
+        actions = ctk.CTkFrame(self.content, fg_color="transparent")
+        actions.pack(fill="x", padx=self.PAD_X, pady=(theme.GAP_XS, theme.GAP_MD))
+        self.import_btn = ghost_button(
+            actions, text="导入 CC Switch", width=140, command=self._on_import_cc_switch
         )
-        self.model_menu = ctk.CTkComboBox(form, values=[MODEL_PLACEHOLDER])
-        self.model_menu.grid(row=6, column=1, sticky="ew", padx=15, pady=8)
+        self.import_btn.pack(side="left")
+        self.fetch_btn = ghost_button(
+            actions, text="获取模型", width=108, command=self._on_fetch_models
+        )
+        self.fetch_btn.pack(side="left", padx=theme.GAP_SM)
+        self.test_btn = primary_button(
+            actions, text="测试接口", width=136, command=self._on_test
+        )
+        self.test_btn.pack(side="right")
+        self.audit_btn = signal_button(
+            actions, text="模型体检", width=136, command=self._on_audit
+        )
+        self.audit_btn.pack(side="right", padx=theme.GAP_SM)
 
-        # 操作按钮
-        actions = ctk.CTkFrame(self, fg_color="transparent")
-        actions.pack(fill="x", padx=20, pady=(0, 6))
-        self.import_btn = ctk.CTkButton(
-            actions, text="导入 CC Switch 配置", height=40, command=self._on_import_cc_switch
+        # 忙碌指示条：常驻一条发丝线，空闲时就是分隔线，运行时才走进度。
+        # 原实现靠 pack_forget 显隐，每次操作都会把下方内容顶动一次。
+        self.progress_bar = ctk.CTkProgressBar(
+            self.content,
+            height=2,
+            corner_radius=0,
+            fg_color=theme.EDGE,
+            progress_color=theme.SIGNAL,
+            mode="determinate",
         )
-        self.import_btn.pack(side="left", padx=5)
-        self.fetch_btn = ctk.CTkButton(
-            actions, text="获取模型", height=40, command=self._on_fetch_models
-        )
-        self.fetch_btn.pack(side="left", padx=5)
-        self.test_btn = ctk.CTkButton(
-            actions,
-            text="测试接口",
-            height=40,
-            fg_color="#ff6b00",
-            hover_color="#e56000",
-            command=self._on_test,
-        )
-        self.test_btn.pack(side="left", padx=5)
-        self.save_btn = ctk.CTkButton(
-            actions,
-            text="保存配置",
-            height=40,
-            fg_color="#374151",
-            hover_color="#1f2937",
-            command=self._on_save,
-        )
-        self.save_btn.pack(side="left", padx=5)
-
-        # 加载进度条（操作进行中显示）
-        self.progress_bar = ctk.CTkProgressBar(self, height=8, mode="indeterminate")
-        self.progress_bar.pack(fill="x", padx=20, pady=(0, 2))
-        self.progress_bar.pack_forget()
+        self.progress_bar.pack(fill="x", padx=self.PAD_X)
+        self.progress_bar.set(0)
 
         # 结果区与日志区
-        self.result_panel = ResultPanel(self)
-        self.result_panel.pack(fill="x", padx=20, pady=6)
-
-        self.log_panel = LogPanel(
-            self, on_clear=self.logger.clear
+        self.result_panel = ResultPanel(
+            self.content, on_copy=lambda text: self._copy_to_clipboard(text, "cURL 命令")
         )
-        self.log_panel.pack(fill="both", expand=True, padx=20, pady=(6, 15))
+        self.result_panel.pack(fill="x", padx=self.PAD_X, pady=(theme.GAP_MD, 0))
 
-    def _form_entry(self, master, row: int, label: str, placeholder: str, show: str | None = None):
-        ctk.CTkLabel(master, text=label, font=("Helvetica", 14)).grid(
-            row=row, column=0, sticky="w", padx=15, pady=8
+        # 日志与体检报告页签；内部文本框按内容撑开，外层滚动条统一滚动，不再两层滚动条
+        self.bottom_tabs = ctk.CTkTabview(
+            self.content,
+            fg_color=theme.PANEL,
+            segmented_button_fg_color=theme.INK,
+            segmented_button_selected_color=theme.NEUTRAL_FILL,
+            segmented_button_selected_hover_color=theme.NEUTRAL_HOVER,
+            segmented_button_unselected_color=theme.INK,
+            segmented_button_unselected_hover_color=theme.CONTROL_HOVER,
+            text_color=theme.TEXT_PRIMARY,
+            anchor="w",
         )
-        kwargs = {"placeholder_text": placeholder, "height": 38}
-        if show:
-            kwargs["show"] = show
-        entry = ctk.CTkEntry(master, **kwargs)
-        entry.grid(row=row, column=1, sticky="ew", padx=15, pady=8)
-        return entry
+        self.bottom_tabs.pack(fill="x", padx=self.PAD_X, pady=(theme.GAP_MD, theme.GAP_XL))
+
+        log_tab = self.bottom_tabs.add("执行日志")
+        audit_tab = self.bottom_tabs.add("模型体检")
+
+        self.log_panel = LogPanel(log_tab, on_clear=self.logger.clear)
+        self.log_panel.pack(fill="both", expand=True)
+
+        self.audit_panel = AuditPanel(
+            audit_tab, on_copy=lambda text: self._copy_to_clipboard(text, "体检报告")
+        )
+        self.audit_panel.pack(fill="both", expand=True)
+
+    def _form_label(self, master, row: int, text: str) -> None:
+        """表单左列标签。等宽字体让「接口地址 / 密钥 / 服务商」右边缘等宽对齐。"""
+
+        ctk.CTkLabel(
+            master, text=text, font=theme.mono(12), text_color=theme.TEXT_MUTED, anchor="w"
+        ).grid(row=row, column=0, sticky="w", padx=(theme.GAP_LG, 0), pady=self.ROW_PAD_Y)
+
+    def _sub_label(self, master, row: int, text: str) -> None:
+        """并排布局中第二个字段的标签，落在第 2 列。"""
+
+        ctk.CTkLabel(
+            master, text=text, font=theme.mono(12), text_color=theme.TEXT_MUTED, anchor="w"
+        ).grid(row=row, column=2, sticky="w", padx=(theme.GAP_LG, 0), pady=self.ROW_PAD_Y)
 
     # ---------- 配置回填 ----------
     def _apply_config(self) -> None:
@@ -226,6 +365,10 @@ class KeyProbeApp(ctk.CTk):
             self._models = [cfg.model]
             self.model_menu.configure(values=[cfg.model])
             self.model_menu.set(cfg.model)
+            self._model_source = "config.json"
+        self.audit_level_menu.set(
+            AUDIT_LEVEL_LABELS.get(cfg.audit_level, AUDIT_LEVEL_LABELS["standard"])
+        )
         self._update_curl_preview()
 
     @staticmethod
@@ -244,6 +387,9 @@ class KeyProbeApp(ctk.CTk):
         except ValueError:
             return 30
 
+    def _audit_level(self) -> AuditLevel:
+        return AUDIT_LEVEL_BY_LABEL.get(self.audit_level_menu.get(), "standard")
+
     def _collect_config(self) -> AppConfig:
         model = self.model_menu.get()
         if model == MODEL_PLACEHOLDER:
@@ -256,7 +402,12 @@ class KeyProbeApp(ctk.CTk):
             model=model,
             timeout=self._timeout(),
             theme_mode="dark",
+            audit_level=self._audit_level(),
         )
+
+    def _on_model_selected(self, choice: str) -> None:
+        self._model_source = "手动选择"
+        self._update_curl_preview()
 
     def _on_provider_change(self, choice: str) -> None:
         self._provider_source = "manual"
@@ -299,10 +450,11 @@ class KeyProbeApp(ctk.CTk):
         self._provider_source = source
 
     def _update_url_mode_label(self) -> None:
+        # 开关文字就是当前状态说明，省掉一个只为解释开关而存在的独立标签
         if self.url_mode_switch.get():
-            self.url_mode_label.configure(text="使用完整地址（不拼接）")
+            self.url_mode_switch.configure(text="完整地址，不拼接")
         else:
-            self.url_mode_label.configure(text="自动拼接接口后缀")
+            self.url_mode_switch.configure(text="自动拼接接口后缀")
         self._update_curl_preview()
 
     def _toggle_key_visible(self) -> None:
@@ -319,15 +471,18 @@ class KeyProbeApp(ctk.CTk):
         self.import_btn.configure(state=state)
         self.fetch_btn.configure(state=state)
         self.test_btn.configure(state=state)
+        self.audit_btn.configure(state=state)
         self.cc_switch_menu.configure(
             state="disabled" if locked or not self._cc_switch_providers else "normal"
         )
         if locked:
-            self.progress_bar.pack(fill="x", padx=20, pady=(0, 2))
+            # 常驻的发丝线切到不定长动画，布局不动，只有那条线活起来
+            self.progress_bar.configure(mode="indeterminate")
             self.progress_bar.start()
         else:
             self.progress_bar.stop()
-            self.progress_bar.pack_forget()
+            self.progress_bar.configure(mode="determinate")
+            self.progress_bar.set(0)
 
     def _on_import_cc_switch(self) -> None:
         if self.is_processing:
@@ -390,6 +545,7 @@ class KeyProbeApp(ctk.CTk):
         self._models = [provider.model]
         self.model_menu.configure(values=self._models)
         self.model_menu.set(provider.model)
+        self._model_source = f"CC Switch · {provider.display_name}"
         self.result_panel.set_model_count(1)
         self._update_url_mode_label()
         self._update_curl_preview()
@@ -440,7 +596,10 @@ class KeyProbeApp(ctk.CTk):
         if result.models:
             self._models = list(result.models)
             self.model_menu.configure(values=result.models)
-            self.model_menu.set(result.models[0])
+            current = self.model_menu.get()
+            if current not in result.models:
+                self.model_menu.set(result.models[0])
+                self._model_source = "模型列表首项"
             self.result_panel.set_model_count(len(result.models))
         else:
             self.result_panel.set_model_count(0)
@@ -492,6 +651,75 @@ class KeyProbeApp(ctk.CTk):
         if result.error_message:
             self.logger.error(result.error_message)
 
+    # ---------- 模型体检 ----------
+    def _on_audit(self) -> None:
+        if self.is_processing:
+            self.logger.warning("正在处理中，请稍候...")
+            return
+        err = self._validate_inputs()
+        if err:
+            self.logger.error(err)
+            return
+        if not self._selected_model():
+            self.logger.error("请先选择或填写模型")
+            return
+        self._select_provider_from_base_url()
+        self.bottom_tabs.set("模型体检")
+        self.audit_panel.reset()
+        self._lock(True)
+        threading.Thread(target=self._audit_worker, daemon=True).start()
+
+    def _audit_worker(self) -> None:
+        try:
+            cfg = self._collect_config()
+            self.logger.info("========== 模型体检 ==========")
+            report = asyncio.run(
+                self.auditor.audit(
+                    provider=cfg.provider,
+                    api_key=cfg.api_key,
+                    model=cfg.model,
+                    timeout=cfg.timeout,
+                    url_mode=cfg.url_mode,
+                    base_url=cfg.base_url,
+                    level=cfg.audit_level,
+                    known_models=self._current_models(),
+                    configured_source=self._model_source,
+                )
+            )
+            self.after(0, lambda: self._apply_audit_report(report))
+        except Exception as exc:
+            self.logger.error(f"模型体检异常: {exc}")
+            self.logger.error(traceback.format_exc())
+            self.after(0, lambda: self.audit_panel.reset())
+        finally:
+            self.after(0, lambda: self._lock(False))
+
+    def _apply_audit_report(self, report: AuditReport) -> None:
+        self.audit_panel.show_report(report)
+        self.result_panel.set_provider(report.provider)
+        if report.error_message:
+            self.logger.error(f"体检未完成：{report.error_message}")
+            return
+        problems = report.problems()
+        if problems:
+            self.logger.warning(f"体检发现 {len(problems)} 项需要关注：")
+            for finding in problems:
+                self.logger.warning(f"  · {finding.title} — {finding.detail}")
+        else:
+            self.logger.success("体检未发现异常")
+
+    def _copy_to_clipboard(self, text: str, what: str = "内容") -> None:
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.logger.success(f"{what}已复制到剪贴板")
+        except Exception as exc:
+            self.logger.error(f"复制失败：{exc}")
+
+    def _selected_model(self) -> str:
+        model = self.model_menu.get().strip()
+        return "" if model == MODEL_PLACEHOLDER else model
+
     def _current_models(self) -> list[str]:
         return self._models
 
@@ -516,16 +744,6 @@ class KeyProbeApp(ctk.CTk):
             return "密钥不能为空"
 
         return None
-
-    def _on_save(self) -> None:
-        self._select_provider_from_base_url()
-        cfg = self._collect_config()
-        try:
-            save_config(cfg)
-            self.config_data = cfg
-            self.logger.success("配置已保存到 config.json")
-        except Exception as exc:
-            self.logger.error(f"保存失败: {exc}")
 
     # ---------- cURL 预览 ----------
     def _update_curl_preview(self) -> None:

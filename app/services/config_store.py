@@ -1,4 +1,4 @@
-"""Load and save local app configuration."""
+"""Load local app configuration."""
 
 from pathlib import Path
 
@@ -17,12 +17,3 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
         return AppConfig.model_validate_json(path.read_text(encoding="utf-8"))
     except Exception:
         return AppConfig()
-
-
-def save_config(config: AppConfig, path: Path = CONFIG_PATH) -> None:
-    """Save config to disk (API key excluded — never persisted)."""
-
-    path.write_text(
-        config.model_dump_json(indent=2, exclude={"api_key"}),
-        encoding="utf-8",
-    )
