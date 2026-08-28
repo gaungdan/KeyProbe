@@ -196,6 +196,46 @@ def test_load_cc_switch_providers_disambiguates_duplicate_labels_and_skips_incom
     assert result.skipped_count == 2
 
 
+def test_load_cc_switch_providers_maps_opencode_first_model(tmp_path: Path) -> None:
+    database = tmp_path / "cc-switch.db"
+    _create_database(database)
+    _insert_provider(
+        database,
+        provider_id="opencode-1",
+        app_type="opencode",
+        name="StepFun",
+        settings={
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": "https://api.stepfun.com/step_plan/v1", "apiKey": "step-key"},
+            "models": {"step-3.7-flash": {"name": "step-3.7-flash"}, "step-3.5-flash": {}},
+        },
+        sort_index=1,
+    )
+    _insert_provider(
+        database,
+        provider_id="opencode-2",
+        app_type="opencode",
+        name="No Models",
+        settings={
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": "https://relay.example/v1", "apiKey": "key"},
+            "models": {},
+        },
+        sort_index=2,
+    )
+
+    result = load_cc_switch_providers(database)
+
+    assert [item.display_name for item in result.providers] == ["StepFun（opencode）"]
+    imported = result.providers[0]
+    assert imported.provider == OPENAI_COMPATIBLE
+    assert imported.base_url == "https://api.stepfun.com/step_plan/v1"
+    assert imported.api_key == "step-key"
+    assert imported.model == "step-3.7-flash"
+    assert imported.url_mode == "auto"
+    assert result.skipped_count == 1
+
+
 def test_load_cc_switch_providers_reports_missing_or_incompatible_database(tmp_path: Path) -> None:
     missing = load_cc_switch_providers(tmp_path / "missing.db")
     assert "未找到" in missing.error_message

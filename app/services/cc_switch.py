@@ -68,7 +68,7 @@ def default_cc_switch_db_path() -> Path:
 
 
 def load_cc_switch_providers(path: Path | None = None) -> CCSwitchImportResult:
-    """Load fully usable Claude, Codex, and Gemini entries without mutating CC Switch."""
+    """Load fully usable Claude, Codex, Gemini, and OpenCode entries without mutating CC Switch."""
 
     database_path = path or default_cc_switch_db_path()
     if not database_path.is_file():
@@ -162,6 +162,8 @@ def _parse_provider(
         return _parse_codex(provider_id, app_type, name, settings, meta)
     if normalized_app_type == "gemini":
         return _parse_gemini(provider_id, app_type, name, settings, meta)
+    if normalized_app_type == "opencode":
+        return _parse_opencode(provider_id, app_type, name, settings, meta)
     return None
 
 
@@ -229,6 +231,29 @@ def _parse_gemini(
         GOOGLE_GEMINI,
         _url_mode(meta),
         _text(env.get("GEMINI_MODEL")),
+    )
+
+
+def _parse_opencode(
+    provider_id: str, app_type: str, name: str, settings: dict[str, Any], meta: dict[str, Any]
+) -> CCSwitchProvider | None:
+    options = _mapping(settings.get("options"))
+    npm = _text(settings.get("npm")).lower()
+    provider = {
+        "@ai-sdk/openai-compatible": OPENAI_COMPATIBLE,
+        "@ai-sdk/openai": OPENAI_RESPONSES,
+        "@ai-sdk/anthropic": ANTHROPIC,
+        "@ai-sdk/google": GOOGLE_GEMINI,
+    }.get(npm)
+    return _build_provider(
+        provider_id,
+        app_type,
+        name or _text(settings.get("name")),
+        _text(options.get("baseURL")),
+        _text(options.get("apiKey")),
+        provider,
+        _url_mode(meta),
+        _first_text(*_mapping(settings.get("models"))),
     )
 
 
