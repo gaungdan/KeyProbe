@@ -34,7 +34,7 @@ from app.services.url_builder import (
     responses_model_urls,
     responses_test_urls,
 )
-from app.services.bedrock_auth import parse_aws_credentials, sign_bedrock_request
+from app.services.auth_headers import build_headers
 
 LogCallback = Callable[[str], None]
 
@@ -370,26 +370,7 @@ class LLMChecker:
     def _headers(
         self, provider: str, api_key: str, method: str = "GET", url: str = "", body: dict[str, Any] | None = None
     ) -> dict[str, str]:
-        if is_anthropic_provider(provider):
-            return {
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            }
-        if provider == GOOGLE_GEMINI:
-            return {"x-goog-api-key": api_key, "Content-Type": "application/json"}
-        if provider == AMAZON_BEDROCK:
-            credentials = parse_aws_credentials(api_key)
-            if credentials:
-                payload = json.dumps(body, separators=(",", ":")).encode("utf-8") if body else b""
-                return {"Content-Type": "application/json", **sign_bedrock_request(
-                    credentials=credentials, method=method, url=url, payload=payload
-                )}
-            return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        return {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        return build_headers(provider, api_key, method, url, body)
 
     def _body(self, provider: str, model: str) -> dict[str, Any]:
         return build_request_body(provider, model)
