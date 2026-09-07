@@ -18,7 +18,7 @@ from app.models.audit import (
 )
 from app.ui import theme
 from app.ui.widgets import ghost_button
-from app.utils.textbox import fit_to_content, hide_scrollbar
+from app.utils.textbox import hide_scrollbar
 
 _SUMMARY_HINTS = {
     Verdict.PASS: "未发现异常",
@@ -95,16 +95,43 @@ class AuditPanel(ctk.CTkFrame):
 
         self.detail_box = ctk.CTkTextbox(
             self,
-            height=120,
+            height=200,
             font=theme.mono(12),
             fg_color=theme.WELL,
             text_color=theme.TEXT_PRIMARY,
             border_width=0,
         )
-        # 不 expand：高度随报告内容撑开，交给外层滚动条统一滚动。
+        # 固定高度，由外层 CTkScrollableFrame 统一滚动，不随报告内容撑高布局。
         self.detail_box.pack(fill="x", padx=theme.GAP_XS, pady=(0, theme.GAP_XS))
         hide_scrollbar(self.detail_box)
         self._configure_tags()
+        # 拦截滚轮事件，避免滚动详情时联动外层 CTkScrollableFrame 一起滚
+        self._bind_scroll_block(self.detail_box)
+
+    @staticmethod
+    def _bind_scroll_block(widget: ctk.CTkTextbox) -> None:
+        """绑定滚轮事件：手动滚动文本框并阻止向外传播，避免内外联动。"""
+
+        def on_scroll(event) -> str:
+            inner = getattr(widget, "_textbox", widget)
+            if hasattr(event, "delta") and event.delta:
+                units = -1 if event.delta > 0 else 1
+                inner.yview_scroll(units, "units")
+            return "break"
+
+        def on_scroll_up(event) -> str:
+            inner = getattr(widget, "_textbox", widget)
+            inner.yview_scroll(-3, "units")
+            return "break"
+
+        def on_scroll_down(event) -> str:
+            inner = getattr(widget, "_textbox", widget)
+            inner.yview_scroll(3, "units")
+            return "break"
+
+        widget.bind("<MouseWheel>", on_scroll)
+        widget.bind("<Button-4>", on_scroll_up)
+        widget.bind("<Button-5>", on_scroll_down)
 
     def _configure_tags(self) -> None:
         # CTkTextbox 底层是 tkinter.Text，可以直接用 tag 上色。
@@ -123,7 +150,6 @@ class AuditPanel(ctk.CTkFrame):
         self.counts_label.configure(text="")
         self.identity_label.configure(text=_IDENTITY_PLACEHOLDER)
         self.detail_box.delete("1.0", "end")
-        fit_to_content(self.detail_box)
 
     def show_report(self, report: AuditReport) -> None:
         """渲染体检报告。"""
@@ -177,7 +203,6 @@ class AuditPanel(ctk.CTkFrame):
                         self._append(f"    {line}\n", "muted")
             self._append("\n")
 
-        fit_to_content(self.detail_box)
         self.detail_box.see("1.0")
 
     def _append(self, text: str, tag: str | None = None) -> None:

@@ -39,7 +39,7 @@ from app.ui.widgets import (
 from app.ui import theme
 from app.utils.security import mask_api_key
 
-MODEL_PLACEHOLDER = "（先获取模型）"
+MODEL_PLACEHOLDER = "获取或直接填写模型 ID"
 CC_SWITCH_PLACEHOLDER = "（请先导入配置）"
 
 
@@ -54,7 +54,7 @@ class KeyProbeApp(ctk.CTk):
         self.checker = LLMChecker(log=self._checker_log)
         self.auditor = ModelAuditor(log=self._checker_log)
         self.is_processing = False
-        self._models: list[str] = []
+        self._listed_models: list[str] = []
         self._cc_switch_providers: dict[str, CCSwitchProvider] = {}
         self._selected_cc_switch_provider: CCSwitchProvider | None = None
         self._provider_source = "auto"
@@ -205,16 +205,18 @@ class KeyProbeApp(ctk.CTk):
                                 padx=(theme.GAP_LG, 0), pady=self.ROW_PAD_Y)
 
         self._sub_label(form, 3, "模型")
+        # 允许手动输入：部分中转站不提供 /models，模型 ID 只能靠用户自己填
         self.model_menu = ComboBox(
             form,
-            values=[MODEL_PLACEHOLDER],
+            values=[],
+            placeholder_text=MODEL_PLACEHOLDER,
             command=self._on_model_selected,
-            readonly=True,
             height=theme.CONTROL_HEIGHT,
             font=theme.mono(12),
         )
         self.model_menu.grid(row=3, column=3, sticky="ew",
                              padx=(0, theme.GAP_LG), pady=self.ROW_PAD_Y)
+        self.model_menu.bind("<KeyRelease>", self._on_model_typed)
 
         self._form_label(form, 4, "CC Switch")
         self.cc_switch_menu = ComboBox(
@@ -227,8 +229,6 @@ class KeyProbeApp(ctk.CTk):
         )
         self.cc_switch_menu.grid(row=4, column=1, sticky="ew",
                                  padx=(theme.GAP_LG, 0), pady=self.ROW_PAD_Y)
-        # 必须先写入占位文字再禁用：disabled 的 Entry 会拒绝 insert，
-        # 若先禁用再 set 会得到一个空白下拉框。
         self.cc_switch_menu.set(CC_SWITCH_PLACEHOLDER)
         self.cc_switch_menu.configure(state="disabled")
 
@@ -362,7 +362,6 @@ class KeyProbeApp(ctk.CTk):
             self.url_mode_switch.select()
         self._update_url_mode_label()
         if cfg.model:
-            self._models = [cfg.model]
             self.model_menu.configure(values=[cfg.model])
             self.model_menu.set(cfg.model)
             self._model_source = "config.json"
@@ -391,15 +390,12 @@ class KeyProbeApp(ctk.CTk):
         return AUDIT_LEVEL_BY_LABEL.get(self.audit_level_menu.get(), "standard")
 
     def _collect_config(self) -> AppConfig:
-        model = self.model_menu.get()
-        if model == MODEL_PLACEHOLDER:
-            model = ""
         return AppConfig(
             base_url=self.base_url_entry.get().strip(),
             api_key=self.api_key_entry.get().strip(),
             url_mode=self._url_mode(),
             provider=normalize_provider(self.provider_menu.get()),
-            model=model,
+            model=self._selected_model(),
             timeout=self._timeout(),
             theme_mode="dark",
             audit_level=self._audit_level(),
@@ -407,6 +403,12 @@ class KeyProbeApp(ctk.CTk):
 
     def _on_model_selected(self, choice: str) -> None:
         self._model_source = "手动选择"
+        self._update_curl_preview()
+
+    def _on_model_typed(self, event=None) -> None:
+        """手动输入模型 ID：中转站拿不到 /models 时的唯一入口。"""
+
+        self._model_source = "手动输入"
         self._update_curl_preview()
 
     def _on_provider_change(self, choice: str) -> None:
@@ -542,11 +544,12 @@ class KeyProbeApp(ctk.CTk):
         else:
             self.url_mode_switch.select()
         self._set_provider(provider.provider, source="cc_switch")
-        self._models = [provider.model]
-        self.model_menu.configure(values=self._models)
+        self.model_menu.configure(values=[provider.model])
         self.model_menu.set(provider.model)
         self._model_source = f"CC Switch · {provider.display_name}"
-        self.result_panel.set_model_count(1)
+        # 换了中转站，上一家的模型列表随即作废，等下面的自动获取重新填充
+        self._listed_models = []
+        self.result_panel.set_model_count(0)
         self._update_url_mode_label()
         self._update_curl_preview()
         self.logger.info(
@@ -594,17 +597,33 @@ class KeyProbeApp(ctk.CTk):
     def _apply_models_result(self, result) -> None:
         self.result_panel.set_provider(result.provider)
         if result.models:
-            self._models = list(result.models)
+            self._listed_models = list(result.models)
             self.model_menu.configure(values=result.models)
-            current = self.model_menu.get()
-            if current not in result.models:
+            current = self._selected_model()
+            if current in result.models:
+                pass
+            elif self._model_source == "手动输入" and current:
+                # 手动填写的模型 ID 多半正是列表里没有的那个，不能被列表首项顶掉
+                self.logger.warning(
+                    f"手动填写的模型 {current} 不在模型列表中，仍按填写值测试"
+                )
+            else:
                 self.model_menu.set(result.models[0])
                 self._model_source = "模型列表首项"
             self.result_panel.set_model_count(len(result.models))
         else:
+            self._listed_models = []
             self.result_panel.set_model_count(0)
             if result.error_message:
                 self.logger.error(result.error_message)
+            if result.raw:
+                raw_text = (
+                    json.dumps(result.raw, ensure_ascii=False, indent=2)
+                    if isinstance(result.raw, dict)
+                    else str(result.raw)
+                )
+                self.logger.error(f"完整响应：\n{raw_text}")
+            self.logger.info("未取到模型列表，可在「模型」框直接填写模型 ID 后测试")
         if result.latency_ms is not None:
             self.result_panel.set_latency(result.latency_ms)
         self._update_curl_preview()
@@ -616,6 +635,9 @@ class KeyProbeApp(ctk.CTk):
         err = self._validate_inputs()
         if err:
             self.logger.error(err)
+            return
+        if not self._selected_model():
+            self.logger.error("请先选择或填写模型")
             return
         self._select_provider_from_base_url()
         self._lock(True)
@@ -650,6 +672,13 @@ class KeyProbeApp(ctk.CTk):
         self.result_panel.set_provider(result.provider)
         if result.error_message:
             self.logger.error(result.error_message)
+        if result.raw:
+            raw_text = (
+                json.dumps(result.raw, ensure_ascii=False, indent=2)
+                if isinstance(result.raw, dict)
+                else str(result.raw)
+            )
+            self.logger.error(f"完整响应：\n{raw_text}")
 
     # ---------- 模型体检 ----------
     def _on_audit(self) -> None:
@@ -699,6 +728,12 @@ class KeyProbeApp(ctk.CTk):
         self.result_panel.set_provider(report.provider)
         if report.error_message:
             self.logger.error(f"体检未完成：{report.error_message}")
+            for probe in report.probes:
+                if probe.error_message:
+                    self.logger.error(
+                        f"  探针「{probe.title}」→ {probe.url} "
+                        f"HTTP {probe.status_code or '—'}｜{probe.error_message}"
+                    )
             return
         problems = report.problems()
         if problems:
@@ -717,11 +752,12 @@ class KeyProbeApp(ctk.CTk):
             self.logger.error(f"复制失败：{exc}")
 
     def _selected_model(self) -> str:
-        model = self.model_menu.get().strip()
-        return "" if model == MODEL_PLACEHOLDER else model
+        return self.model_menu.get().strip()
 
     def _current_models(self) -> list[str]:
-        return self._models
+        """服务端真实返回过的模型列表；手动填写或配置带入的模型不算在内。"""
+
+        return self._listed_models
 
     def _validate_inputs(self) -> str | None:
         """Validate form inputs before making API calls. Returns error message or None."""
@@ -750,9 +786,7 @@ class KeyProbeApp(ctk.CTk):
         base_url = self.base_url_entry.get().strip()
         provider = self.provider_menu.get()
         api_key = mask_api_key(self.api_key_entry.get())
-        model = self.model_menu.get()
-        if model == MODEL_PLACEHOLDER:
-            model = "<模型>"
+        model = self._selected_model() or "<模型>"
 
         if not base_url:
             self.result_panel.set_curl("")

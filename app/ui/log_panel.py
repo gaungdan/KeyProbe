@@ -6,7 +6,7 @@ import customtkinter as ctk
 
 from app.ui import theme
 from app.ui.widgets import ghost_button
-from app.utils.textbox import fit_to_content, hide_scrollbar
+from app.utils.textbox import hide_scrollbar
 
 
 class LogPanel(ctk.CTkFrame):
@@ -42,28 +42,54 @@ class LogPanel(ctk.CTkFrame):
 
         self.log_text = ctk.CTkTextbox(
             self,
+            height=200,
             font=theme.mono(12),
             fg_color=theme.WELL,
             text_color=theme.TEXT_PRIMARY,
             border_width=0,
         )
-        # 不 expand：高度随日志条数撑开，交给外层滚动条统一滚动。
+        # 固定高度，由外层 CTkScrollableFrame 统一滚动，不随日志增长撑高布局。
         self.log_text.pack(fill="x", padx=theme.GAP_XS, pady=(0, theme.GAP_XS))
         hide_scrollbar(self.log_text)
-        fit_to_content(self.log_text)
+        # 拦截滚轮事件，避免滚动日志时联动外层 CTkScrollableFrame 一起滚
+        self._bind_scroll_block(self.log_text)
+
+    @staticmethod
+    def _bind_scroll_block(widget: ctk.CTkTextbox) -> None:
+        """绑定滚轮事件：手动滚动文本框并阻止向外传播，避免内外联动。"""
+
+        def on_scroll(event) -> str:
+            inner = getattr(widget, "_textbox", widget)
+            # Windows: event.delta > 0 向上滚, < 0 向下滚, 步长 120
+            if hasattr(event, "delta") and event.delta:
+                units = -1 if event.delta > 0 else 1
+                inner.yview_scroll(units, "units")
+            return "break"
+
+        def on_scroll_up(event) -> str:
+            inner = getattr(widget, "_textbox", widget)
+            inner.yview_scroll(-3, "units")
+            return "break"
+
+        def on_scroll_down(event) -> str:
+            inner = getattr(widget, "_textbox", widget)
+            inner.yview_scroll(3, "units")
+            return "break"
+
+        widget.bind("<MouseWheel>", on_scroll)
+        widget.bind("<Button-4>", on_scroll_up)
+        widget.bind("<Button-5>", on_scroll_down)
 
     def log(self, message: str) -> None:
         """追加一行日志并滚动到底部。"""
 
         self.log_text.insert("end", message + "\n")
         self.log_text.see("end")
-        fit_to_content(self.log_text)
 
     def clear(self) -> None:
         """清空文本框。"""
 
         self.log_text.delete("1.0", "end")
-        fit_to_content(self.log_text)
 
     def _clear(self) -> None:
         self.clear()

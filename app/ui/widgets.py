@@ -127,10 +127,23 @@ class ComboBox(_WidthSyncMixin, ctk.CTkComboBox):
     默认保留手动输入能力：弹层关闭后输入框已获得焦点，再次点击不会重复弹出。
     传入 ``readonly=True`` 则退化为纯选择器，禁止键盘输入，
     点击任意位置总是展开下拉列表。
+
+    ``placeholder_text`` 在输入框为空且未聚焦时显示灰字提示，
+    此时 ``get()`` 返回空串，提示文字不会被当成真实取值。
+    带占位提示的下拉框初始为空（不预选首项），语义上就是「尚未选定」。
     """
 
-    def __init__(self, master, *, readonly: bool = False, **kwargs) -> None:
+    def __init__(
+        self,
+        master,
+        *,
+        readonly: bool = False,
+        placeholder_text: str = "",
+        **kwargs,
+    ) -> None:
         self._readonly = readonly
+        self._placeholder_text = placeholder_text
+        self._placeholder_shown = False
         if readonly:
             kwargs.setdefault("state", "readonly")
         for key, value in _CONTROL_STYLE.items():
@@ -142,6 +155,13 @@ class ComboBox(_WidthSyncMixin, ctk.CTkComboBox):
             self.set(self._values[0])
         # CTkComboBox.bind 会转发到内部 entry，这里需要直接绑定 entry
         self._entry.bind("<Button-1>", self._on_entry_click, add=True)
+        self._entry.bind("<FocusIn>", self._clear_placeholder, add=True)
+        self._entry.bind("<FocusOut>", self._restore_placeholder, add=True)
+        # 有占位提示就意味着「尚未选定」，父类初始化时自动填入的首项（或演示文字
+        # "CTkComboBox"）必须先清掉，否则占位提示永远不会出现。
+        if placeholder_text and self._variable is None:
+            self._replace_entry_text("")
+        self._restore_placeholder()
         self._bind_width_sync()
 
     def configure(self, require_redraw=False, **kwargs):
@@ -150,6 +170,64 @@ class ComboBox(_WidthSyncMixin, ctk.CTkComboBox):
         if self._readonly and kwargs.get("state") == "normal":
             kwargs["state"] = "readonly"
         super().configure(require_redraw=require_redraw, **kwargs)
+
+    # ---------- 取值 ----------
+    def get(self) -> str:
+        return "" if self._placeholder_shown else super().get()
+
+    def set(self, value: str) -> None:
+        """写入取值；传空串则回到占位提示。"""
+
+        self._placeholder_shown = False
+        self._replace_entry_text(value)
+        if value.strip():
+            self._apply_entry_color()
+        else:
+            self._restore_placeholder()
+
+    # ---------- 占位提示 ----------
+    def _replace_entry_text(self, text: str) -> None:
+        """写入输入框内容。readonly / disabled 的 Entry 会拒绝 insert，需临时解锁。"""
+
+        locked = self._state in ("readonly", tkinter.DISABLED)
+        if locked:
+            self._entry.configure(state="normal")
+        self._entry.delete(0, tkinter.END)
+        if text:
+            self._entry.insert(0, text)
+        if locked:
+            self._entry.configure(state=self._state)
+
+    def _apply_entry_color(self) -> None:
+        color = theme.TEXT_FAINT if self._placeholder_shown else self._text_color
+        self._entry.configure(fg=self._apply_appearance_mode(color))
+
+    def _clear_placeholder(self, event=None) -> None:
+        if not self._placeholder_shown:
+            return
+        self._placeholder_shown = False
+        self._replace_entry_text("")
+        self._apply_entry_color()
+
+    def _restore_placeholder(self, event=None) -> None:
+        if not self._placeholder_text or self._placeholder_shown:
+            return
+        if self._entry.get().strip():
+            return
+        self._placeholder_shown = True
+        self._replace_entry_text(self._placeholder_text)
+        self._apply_entry_color()
+
+    def _draw(self, no_color_updates: bool = False) -> None:
+        # 父类 _draw 会按 text_color 重设 entry 前景色，重绘后需要把灰字改回来
+        super()._draw(no_color_updates)
+        if getattr(self, "_placeholder_shown", False):
+            self._apply_entry_color()
+
+    def _dropdown_callback(self, value: str) -> None:
+        self._placeholder_shown = False
+        super()._dropdown_callback(value)
+        self._apply_entry_color()
 
     def _on_entry_click(self, event=None):
         if self._state == tkinter.DISABLED or not self._values:
