@@ -1,4 +1,4 @@
-"""CTkTextbox 辅助：隐藏内置滚动条、按内容自适应高度。
+"""CTkTextbox 辅助：只读态、内置滚动条的外观与高度自适应。
 
 外层主内容区是 CTkScrollableFrame，由它统一负责滚动；
 但页签里的日志窗与体检窗是固定高度、自己滚动的读数窗，
@@ -8,6 +8,29 @@
 from __future__ import annotations
 
 import customtkinter as ctk
+
+
+READONLY_BINDTAG = "ReadOnlyText"
+
+
+def make_readonly(box: ctk.CTkTextbox, *, caret_color: str | None = None) -> None:
+    """把读数窗变成只读：能选中、能复制，敲键盘和粘贴都改不了内容。
+
+    不能在控件自己的 ``<Key>`` 绑定里拦——Tk 先跑 Text 类绑定（已经插进字符了），
+    控件绑定才执行。这里往绑定链里插一个自定义类标签，它排在 ``Text`` 之前，
+    返回 ``break`` 就能截断后续处理；鼠标选择、``<<Copy>>`` 不在拦截名单里，照常可用。
+    程序更新文本走 ``insert``/``delete`` 命令，不受事件绑定影响。
+
+    ``caret_color`` 传窗底色即可让插入光标隐形：只读窗还闪一根竖线，
+    等于暗示「这里可以打字」。Tk 不接受 ``transparent``，所以用同色代替。
+    """
+
+    inner = getattr(box, "_textbox", box)
+    for sequence in ("<Key>", "<<Paste>>", "<<Cut>>", "<<Clear>>"):
+        inner.bind_class(READONLY_BINDTAG, sequence, lambda _event: "break")
+    inner.bindtags((str(inner), READONLY_BINDTAG, "Text", "all"))
+    if caret_color is not None:
+        inner.configure(insertbackground=caret_color)
 
 
 def hide_scrollbar(box: ctk.CTkTextbox) -> None:

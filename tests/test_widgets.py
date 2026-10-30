@@ -1,4 +1,4 @@
-"""ComboBox 占位提示的取值契约。无显示环境时整体跳过。"""
+"""ComboBox 占位提示的取值契约与读数窗的只读/复制契约。无显示环境时整体跳过。"""
 
 from collections.abc import Iterator
 
@@ -6,7 +6,9 @@ import pytest
 
 ctk = pytest.importorskip("customtkinter")
 
+from app.services.url_builder import curl_command, curl_preview  # noqa: E402
 from app.ui import theme  # noqa: E402 - 必须在 importorskip 之后
+from app.ui.result_panel import ResultPanel  # noqa: E402
 from app.ui.widgets import ComboBox  # noqa: E402
 
 PLACEHOLDER = "获取或直接填写模型 ID"
@@ -122,3 +124,47 @@ def test_dropdown_entries_padded_and_headers_disabled(root) -> None:
     assert menu.entrycget(1, "state") == "normal"
     # 标题只是分隔，取值列表里不能真的选中它
     assert not str(menu.entrycget(1, "label")).startswith("──")
+
+
+def test_curl_preview_is_readonly(root) -> None:
+    """request 区是读数窗：能选中，但敲键盘、粘贴都改不动它。"""
+
+    panel = ResultPanel(root)
+    display = curl_preview(
+        "https://api.example.com/v1/messages",
+        [("x-api-key", "sk-abc***xyz"), ("Content-Type", "application/json")],
+        {"model": "m", "max_tokens": 16},
+    )
+    panel.set_curl(display)
+    root.update_idletasks()
+    root.update()
+
+    inner = panel.curl_preview._textbox
+    assert inner.get("1.0", "end-1c") == display
+
+    inner.focus_force()
+    inner.mark_set("insert", "end")
+    root.update()
+    inner.event_generate("<Key>", keysym="x")
+    inner.event_generate("<Control-v>")
+    inner.event_generate("<<Paste>>", data="curl --evil")
+    root.update()
+
+    assert inner.get("1.0", "end-1c") == display
+
+
+def test_curl_copy_button_emits_single_line(root) -> None:
+    """展示用续行写法，复制出来必须是一条能直接粘进终端的命令。"""
+
+    copied: list[str] = []
+    panel = ResultPanel(root, on_copy=copied.append)
+    headers = [("x-api-key", "sk-abc***xyz"), ("Content-Type", "application/json")]
+    body = {"model": "m", "max_tokens": 16}
+    url = "https://api.example.com/v1/messages"
+    panel.set_curl(curl_preview(url, headers, body), copy_text=curl_command(url, headers, body, windows=False))
+
+    panel.copy_btn.invoke()
+
+    assert copied == [curl_command(url, headers, body, windows=False)]
+    assert "\n" not in copied[0]
+    assert "\\" not in copied[0]

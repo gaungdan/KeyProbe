@@ -16,6 +16,8 @@ from app.services.providers import (
 from app.services.url_builder import (
     anthropic_model_urls,
     anthropic_test_urls,
+    curl_command,
+    curl_preview,
     full_url_model_urls,
     openai_model_urls,
     openai_test_urls,
@@ -128,6 +130,43 @@ def test_provider_detection() -> None:
     assert detect_provider("https://bedrock-runtime.us-east-1.amazonaws.com") == AMAZON_BEDROCK
     assert detect_provider("https://generativelanguage.googleapis.com") == GOOGLE_GEMINI
     assert detect_provider("https://example.com") == OPENAI_COMPATIBLE
+
+
+def test_curl_clipboard_command_is_one_line() -> None:
+    """复制的是单条命令：反斜杠续行粘进 PowerShell 会被拆成好几条，逐行报错。
+
+    展示区仍保留续行写法，靠 set_curl 的 copy_text 分开两份文本。
+    """
+
+    url = "https://api.hcnsec.cn/v1/messages"
+    headers = [("x-api-key", "sk-abc***xyz"), ("Content-Type", "application/json")]
+    body = {"model": "DeepSeek-V4-Flash", "messages": [{"role": "user", "content": "hello"}]}
+
+    command = curl_command(url, headers, body, windows=False)
+    assert "\n" not in command
+    assert " \\" not in command
+    assert command.startswith("curl -X POST ")
+    assert '-H "x-api-key: sk-abc***xyz"' in command
+    assert command.endswith("""-d '{"model": "DeepSeek-V4-Flash", "messages": [{"role": "user", "content": "hello"}]}'""")
+
+    preview = curl_preview(url, headers, body)
+    assert preview.count("\\\n") == 3
+    assert preview.startswith("curl -X POST")
+
+
+def test_curl_clipboard_command_survives_windows_powershell() -> None:
+    """Windows PowerShell 5.1 里裸 curl 是 Invoke-WebRequest 别名，
+    且传给原生程序时会吃掉成对双引号——所以写 curl.exe，正文用 '{"k\":...}'。
+    """
+
+    url = "https://api.hcnsec.cn/v1/messages"
+    headers = [("x-api-key", "sk-abc***xyz"), ("Content-Type", "application/json")]
+    body = {"model": "m", "max_tokens": 16}
+
+    command = curl_command(url, headers, body, windows=True)
+    assert "\n" not in command
+    assert command.startswith("curl.exe -X POST ")
+    assert """-d '{\\"model\\": \\"m\\", \\"max_tokens\\": 16}'""" in command
 
 
 def test_mask_api_key_never_returns_full_key() -> None:

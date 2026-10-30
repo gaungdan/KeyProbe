@@ -1,4 +1,7 @@
-"""Build request URLs for auto and full URL modes."""
+"""Build request URLs, endpoint payloads and copy-paste cURL commands."""
+
+import json
+import sys
 from collections.abc import Iterable
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -243,3 +246,35 @@ def pick_test_url(provider: str, base_url: str, model: str, url_mode: str) -> st
     if provider == OPENAI_RESPONSES:
         return responses_test_urls(base_url)[0]
     return openai_test_urls(base_url)[0]
+
+
+# ── cURL 预览与复制 ─────────────────────────────────────────────────────
+
+
+def curl_preview(url: str, headers: Iterable[tuple[str, str]], body: dict) -> str:
+    """展示用：反斜杠续行的多行形式，长命令也能一眼看完结构。"""
+
+    parts = [f"curl -X POST {url}"]
+    parts += [f'-H "{name}: {value}"' for name, value in headers]
+    parts.append(f"-d '{json.dumps(body, ensure_ascii=False)}'")
+    return " \\\n  ".join(parts)
+
+
+def curl_command(url: str, headers: Iterable[tuple[str, str]], body: dict, *, windows: bool | None = None) -> str:
+    """复制用：一条不换行的命令，粘进终端就能直接执行。
+
+    Windows 按 PowerShell 生成，两个坑都得绕：裸 ``curl`` 在那儿是
+    ``Invoke-WebRequest`` 的别名，所以写 ``curl.exe``；而 Windows PowerShell 5.1
+    把参数交给原生程序时会吃掉成对的双引号，``-d "{\\"k\\":\\"v\\"}"`` 到
+    curl 手里只剩 ``{k: v}``（实测服务端收到的是这个）。换成外层单引号 +
+    内层 ``\\"`` 后，5.1 实测能收到完整 JSON；代价是 cmd.exe 里要自己改引号。
+    """
+
+    on_windows = sys.platform.startswith("win") if windows is None else windows
+    payload = json.dumps(body, ensure_ascii=False)
+    if on_windows:
+        payload = payload.replace('"', '\\"')
+    parts = [f"{'curl.exe' if on_windows else 'curl'} -X POST {url}"]
+    parts += [f'-H "{name}: {value}"' for name, value in headers]
+    parts.append(f"-d '{payload}'")
+    return " ".join(parts)

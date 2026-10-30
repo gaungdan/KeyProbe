@@ -30,7 +30,12 @@ from app.services.providers import (
     is_anthropic_provider,
     normalize_provider,
 )
-from app.services.url_builder import build_request_body, pick_test_url
+from app.services.url_builder import (
+    build_request_body,
+    curl_command,
+    curl_preview,
+    pick_test_url,
+)
 from app.ui.audit_panel import AuditPanel
 from app.ui.log_panel import LogPanel
 from app.ui.result_panel import ResultPanel
@@ -455,7 +460,7 @@ class KeyProbeApp(ctk.CTk):
 
         # 结果区
         self.result_panel = ResultPanel(
-            self.content, on_copy=lambda text: self._copy_to_clipboard(text, "cURL 命令")
+            self.content, on_copy=lambda text: self._copy_to_clipboard(text, "单行 cURL 命令")
         )
         self.result_panel.pack(fill="x", padx=self.PAD_X, pady=theme.GAP_XS)
 
@@ -648,6 +653,9 @@ class KeyProbeApp(ctk.CTk):
         self._api_key_visible = not self._api_key_visible
         self.api_key_entry.configure(show="" if self._api_key_visible else "*")
         self.eye_btn.configure(image=self._eye_off_icon if self._api_key_visible else self._eye_icon)
+        # cURL 里的密钥跟着输入框走：藏起来时复制出来的是打不通的命令，
+        # 点开眼睛就是为了能直接把命令粘进终端。
+        self._update_curl_preview()
 
     def _checker_log(self, message: str) -> None:
         self.logger.info(message)
@@ -1048,7 +1056,10 @@ class KeyProbeApp(ctk.CTk):
         self._update_endpoint_hint()
         base_url = self.base_url_entry.get().strip()
         provider = self.provider_menu.get()
-        api_key = mask_api_key(self.api_key_entry.get())
+        # 眼睛点开时展示真实密钥，让「看得见的命令」和「复制出去能跑」是同一份文本；
+        # 收起时保持脱敏，脱敏值本来就打不通，不额外泄密。
+        raw_key = self.api_key_entry.get().strip()
+        api_key = raw_key if self._api_key_visible else mask_api_key(raw_key)
         model = self._selected_model() or "<模型>"
 
         if not base_url:
@@ -1056,26 +1067,23 @@ class KeyProbeApp(ctk.CTk):
             return
 
         url = pick_test_url(provider, base_url, model, self._url_mode())
-        auth_header = self._curl_auth_header(provider, api_key)
+        headers = self._curl_headers(provider, api_key)
         body = build_request_body(provider, model)
-
-        curl = (
-            f"curl -X POST {url} \
-"
-            f'  {auth_header} \
-'
-            f'  -H "Content-Type: application/json" \
-'
-            f"  -d '{json.dumps(body, ensure_ascii=False)}'"
+        self.result_panel.set_curl(
+            curl_preview(url, headers, body),
+            copy_text=curl_command(url, headers, body),
         )
-        self.result_panel.set_curl(curl)
 
     @staticmethod
-    def _curl_auth_header(provider: str, masked_key: str) -> str:
-        """Return the cURL auth header for the given provider."""
+    def _curl_headers(provider: str, api_key: str) -> list[tuple[str, str]]:
+        """Return the request header pairs for the given provider."""
+
         p = provider.lower()
         if "anthropic" in p or "claude" in p or "协议" in p:
-            return f'-H "x-api-key: {masked_key}" -H "anthropic-version: 2023-06-01"'
-        if "gemini" in p:
-            return f'-H "x-goog-api-key: {masked_key}"'
-        return f'-H "Authorization: Bearer {masked_key}"'
+            headers = [("x-api-key", api_key), ("anthropic-version", "2023-06-01")]
+        elif "gemini" in p:
+            headers = [("x-goog-api-key", api_key)]
+        else:
+            headers = [("Authorization", f"Bearer {api_key}")]
+        headers.append(("Content-Type", "application/json"))
+        return headers

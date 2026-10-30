@@ -13,7 +13,7 @@ import customtkinter as ctk
 from app.models.check import CheckStatus
 from app.ui import theme
 from app.ui.widgets import icon_button, load_icon
-from app.utils.textbox import fit_to_wrapped_content, hide_scrollbar
+from app.utils.textbox import fit_to_wrapped_content, hide_scrollbar, make_readonly
 
 STATUS_COLORS = {
     CheckStatus.VALID: theme.OK,
@@ -44,7 +44,7 @@ class ResultPanel(ctk.CTkFrame):
         self._provider = ""
         self._model_count = 0
         self._on_copy = on_copy
-        self._curl_text = ""
+        self._curl_copy = ""
         self._create_widgets()
 
     def _create_widgets(self) -> None:
@@ -141,6 +141,8 @@ class ResultPanel(ctk.CTkFrame):
         )
         self.curl_preview.pack(fill="x", padx=theme.GAP_LG, pady=(0, theme.GAP_SM))
         hide_scrollbar(self.curl_preview)
+        # 这块只是预览，改了也不影响真实请求；留着可编辑只会让人误敲字符把命令改坏
+        make_readonly(self.curl_preview, caret_color=theme.WELL)
         # 宽度变化时重新计算换行后的高度，保证内容始终完整展示
         self.curl_preview.bind("<Configure>", self._on_curl_resize)
         self._curl_last_width = 0
@@ -185,14 +187,17 @@ class ResultPanel(ctk.CTkFrame):
             parts.append(f"{self._model_count} 个模型")
         self.context_value.configure(text=" · ".join(parts) or "填入接口地址与密钥后开始")
 
-    def set_curl(self, curl: str) -> None:
+    def set_curl(self, curl: str, *, copy_text: str = "") -> None:
         """更新 cURL 预览。
+
+        ``curl`` 是展示用的多行形式，``copy_text`` 是复制用的一条命令：
+        续行反斜杠粘进 PowerShell、cmd 会被拆成好几条命令，所以两者不能是同一份文本。
 
         高度只在「提交后」重算一次，且上下限收窄到 88–140px：
         之前每次按键都重算、上限到 400px，输入 URL 的过程中整页内容会跟着上下跳。
         """
 
-        self._curl_text = curl
+        self._curl_copy = copy_text or curl
         self.copy_btn.configure(state="normal" if curl else "disabled")
         self.curl_preview.delete("1.0", "end")
         self.curl_preview.insert("1.0", curl)
@@ -203,8 +208,8 @@ class ResultPanel(ctk.CTkFrame):
         )
 
     def _copy_curl(self) -> None:
-        if self._curl_text and self._on_copy:
-            self._on_copy(self._curl_text)
+        if self._curl_copy and self._on_copy:
+            self._on_copy(self._curl_copy)
 
     def _on_curl_resize(self, event=None) -> None:
         """宽度变化会改变换行结果，需要重新计算高度。"""
