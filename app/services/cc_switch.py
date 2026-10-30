@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import tomllib
 from collections import Counter
@@ -24,6 +25,20 @@ from app.services.providers import (
 CC_SWITCH_DB_NAME = "cc-switch.db"
 CC_SWITCH_DIRECTORY = ".cc-switch"
 _REQUIRED_COLUMNS = {"id", "app_type", "name", "settings_config", "meta", "sort_index"}
+# CC Switch 新版把 Claude 的模型选择拆成档位：settings.model 存档位名，
+# 实际生效的模型在 env 的 ANTHROPIC_DEFAULT_<档位>_MODEL(_NAME) 里。
+_CLAUDE_MODEL_TIERS = ("fable", "sonnet", "opus", "haiku")
+# 模型名可能带 CC Switch 自己的上下文标记，例如 deepseek-v4-flash[1M]。
+_MODEL_SUFFIX_PATTERN = re.compile(r"\[[^\]]*\]\s*$")
+# 下拉框按 app_type 分组展示，顺序沿用 CC Switch 左侧的客户端顺序。
+APP_TYPE_ORDER = ("claude", "codex", "gemini", "opencode", "grokbuild")
+APP_TYPE_LABELS = {
+    "claude": "Claude",
+    "codex": "Codex",
+    "gemini": "Gemini",
+    "opencode": "OpenCode",
+    "grokbuild": "Grok Build",
+}
 
 
 @dataclass(frozen=True)
@@ -39,6 +54,7 @@ class CCSwitchProvider:
     provider: str
     url_mode: UrlMode
     model: str
+    sort_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -108,7 +124,7 @@ def load_cc_switch_providers(path: Path | None = None) -> CCSwitchImportResult:
 
     providers: list[CCSwitchProvider] = []
     skipped_count = 0
-    for provider_id, app_type, name, settings_raw, meta_raw, _ in rows:
+    for provider_id, app_type, name, settings_raw, meta_raw, sort_index in rows:
         provider = _parse_provider(
             provider_id=str(provider_id),
             app_type=str(app_type),
@@ -119,7 +135,7 @@ def load_cc_switch_providers(path: Path | None = None) -> CCSwitchImportResult:
         if provider is None:
             skipped_count += 1
         else:
-            providers.append(provider)
+            providers.append(replace(provider, sort_index=sort_index))
 
     if not providers:
         return CCSwitchImportResult(
@@ -130,9 +146,26 @@ def load_cc_switch_providers(path: Path | None = None) -> CCSwitchImportResult:
         )
 
     return CCSwitchImportResult(
-        providers=_with_display_names(providers),
+        providers=_with_display_names(sorted(providers, key=_group_sort_key)),
         source_path=database_path,
         skipped_count=skipped_count,
+    )
+
+
+def _group_sort_key(provider: CCSwitchProvider) -> tuple[int, int, int, str, str]:
+    """先按客户端分组（claude/codex/…），组内再按 CC Switch 的 sort_index。"""
+
+    app_type = provider.app_type.strip().lower()
+    group_rank = (
+        APP_TYPE_ORDER.index(app_type) if app_type in APP_TYPE_ORDER else len(APP_TYPE_ORDER)
+    )
+    has_index = provider.sort_index is not None
+    return (
+        group_rank,
+        0 if has_index else 1,
+        provider.sort_index or 0,
+        provider.name.lower(),
+        provider.selection_id,
     )
 
 
@@ -164,6 +197,8 @@ def _parse_provider(
         return _parse_gemini(provider_id, app_type, name, settings, meta)
     if normalized_app_type == "opencode":
         return _parse_opencode(provider_id, app_type, name, settings, meta)
+    if normalized_app_type == "grokbuild":
+        return _parse_grokbuild(provider_id, app_type, name, settings, meta)
     return None
 
 
@@ -178,7 +213,7 @@ def _parse_claude(
         env.get("OPENROUTER_API_KEY"),
         env.get("GOOGLE_API_KEY"),
     )
-    model = _text(env.get("ANTHROPIC_MODEL"))
+    model = _claude_model(env, settings)
     api_format = _text(meta.get("apiFormat")).lower() or "anthropic"
     provider = {
         "anthropic": ANTHROPIC,
@@ -231,6 +266,78 @@ def _parse_gemini(
         GOOGLE_GEMINI,
         _url_mode(meta),
         _text(env.get("GEMINI_MODEL")),
+    )
+
+
+def _claude_model(env: dict[str, Any], settings: dict[str, Any]) -> str:
+    """Resolve the model Claude Code actually launches with.
+
+    CC Switch 新版把档位选择存在 settings.model（fable/sonnet/opus/haiku），
+    对应模型在 ANTHROPIC_DEFAULT_<TIER>_MODEL 里；旧版只写 ANTHROPIC_MODEL。
+    两者都存在时以档位为准，否则导入的模型会和 CC Switch 实际运行的不一致。
+    """
+
+    candidates: list[Any] = []
+    tier = _text(settings.get("model")).lower()
+    if tier in _CLAUDE_MODEL_TIERS:
+        upper = tier.upper()
+        candidates.append(env.get(f"ANTHROPIC_DEFAULT_{upper}_MODEL_NAME"))
+        candidates.append(env.get(f"ANTHROPIC_DEFAULT_{upper}_MODEL"))
+    candidates.append(env.get("ANTHROPIC_MODEL"))
+    for fallback_tier in _CLAUDE_MODEL_TIERS:
+        upper = fallback_tier.upper()
+        candidates.append(env.get(f"ANTHROPIC_DEFAULT_{upper}_MODEL_NAME"))
+        candidates.append(env.get(f"ANTHROPIC_DEFAULT_{upper}_MODEL"))
+    return _strip_model_suffix(_first_text(*candidates))
+
+
+def _strip_model_suffix(model: str) -> str:
+    """Drop CC Switch 的上下文标记，例如 deepseek-v4-flash[1M] -> deepseek-v4-flash。"""
+
+    stripped = _MODEL_SUFFIX_PATTERN.sub("", model).strip()
+    return stripped or model
+
+
+def _parse_grokbuild(
+    provider_id: str, app_type: str, name: str, settings: dict[str, Any], meta: dict[str, Any]
+) -> CCSwitchProvider | None:
+    """Parse Grok CLI style config: [models].default + [model."<key>"]. """
+
+    config_text = _text(settings.get("config"))
+    if not config_text:
+        return None
+    try:
+        config = tomllib.loads(config_text)
+    except tomllib.TOMLDecodeError:
+        return None
+
+    default_key = _text(_mapping(config.get("models")).get("default"))
+    entries = _mapping(config.get("model"))
+    entry = _mapping(entries.get(default_key)) if default_key else {}
+    if not entry:
+        entry = next((value for value in entries.values() if isinstance(value, dict)), {})
+
+    backend = _text(entry.get("api_backend")).lower() or _text(meta.get("apiFormat")).lower()
+    provider = {
+        "responses": OPENAI_RESPONSES,
+        "openai_responses": OPENAI_RESPONSES,
+        "chat": OPENAI_COMPATIBLE,
+        "chat_completions": OPENAI_COMPATIBLE,
+        "openai_chat": OPENAI_COMPATIBLE,
+        "anthropic": ANTHROPIC,
+        "messages": ANTHROPIC,
+        "gemini": GOOGLE_GEMINI,
+        "google": GOOGLE_GEMINI,
+    }.get(backend)
+    return _build_provider(
+        provider_id,
+        app_type,
+        name or _text(entry.get("name")),
+        _text(entry.get("base_url")),
+        _text(entry.get("api_key")),
+        provider,
+        _url_mode(meta),
+        _first_text(entry.get("model"), default_key),
     )
 
 
@@ -290,12 +397,23 @@ def _with_display_names(providers: list[CCSwitchProvider]) -> list[CCSwitchProvi
     for provider, label in zip(providers, base_labels, strict=True):
         display_name = label
         if label_counts[label] > 1:
-            display_name = f"{label} · {provider.selection_id.rsplit(':', 1)[-1][:8]}"
+            display_name = f"{label} · {_id_suffix(provider.selection_id)}"
         used_labels[display_name] += 1
         if used_labels[display_name] > 1:
             display_name = f"{display_name}-{used_labels[display_name]}"
         labeled.append(replace(provider, display_name=display_name))
     return labeled
+
+
+def _id_suffix(selection_id: str) -> str:
+    """给重名配置一个能区分开的短标识。
+
+    id 较短时直接用整段；较长时（UUID、mycodex-1787292292907 这类时间戳 id）
+    取尾部，避免像旧逻辑那样按前 8 位截断后全都变成 "mycodex-"。
+    """
+
+    raw_id = selection_id.rsplit(":", 1)[-1]
+    return raw_id if len(raw_id) <= 12 else raw_id[-6:]
 
 
 def _url_mode(meta: dict[str, Any]) -> UrlMode:

@@ -84,3 +84,41 @@ def test_set_works_on_disabled_combobox(root) -> None:
 
     box.set("b")
     assert box.get() == "b"
+
+
+def test_dropdown_arrow_is_repainted_uniformly(root) -> None:
+    """内置箭头（粗折线或字形）必须换成自绘折线，两个控件才是一套。"""
+
+    from app.ui.widgets import OptionMenu, _ARROW_TAG
+
+    combo = ComboBox(root, values=["a", "b"], readonly=True, height=theme.CONTROL_HEIGHT)
+    menu = OptionMenu(root, values=["c", "d"], height=theme.CONTROL_HEIGHT)
+    root.update_idletasks()
+
+    shapes = []
+    for widget in (combo, menu):
+        canvas = widget._canvas
+        assert canvas.find_withtag(_ARROW_TAG), "自绘箭头缺失"
+        assert not canvas.find_withtag("dropdown_arrow"), "原生箭头没有清掉"
+        coords = [float(v) for v in canvas.tk.splitlist(
+            canvas.tk.call(canvas._w, "coords", _ARROW_TAG))]
+        assert len(coords) == 6, "箭头应为三点折线"
+        assert float(canvas.itemcget(_ARROW_TAG, "width")) == 2
+        # 横向 / 纵向跨度一致：并排放着才是同一个记号
+        shapes.append((round(coords[4] - coords[0], 1), round(coords[3] - coords[1], 1)))
+    assert shapes[0] == shapes[1]
+
+
+def test_dropdown_entries_padded_and_headers_disabled(root) -> None:
+    """弹层条目统一左内缩，分组标题置灰且不可选。"""
+
+    box = ComboBox(root, values=["── 分组（1）──", "real"], readonly=True)
+    root.update_idletasks()
+    box.set_header_values({"── 分组（1）──"})
+    menu = box._dropdown_menu
+
+    assert str(menu.entrycget(0, "label")).startswith("  ")
+    assert menu.entrycget(0, "state") == "disabled"
+    assert menu.entrycget(1, "state") == "normal"
+    # 标题只是分隔，取值列表里不能真的选中它
+    assert not str(menu.entrycget(1, "label")).startswith("──")

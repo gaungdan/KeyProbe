@@ -125,16 +125,16 @@ wire_api = "chat"
 
     assert result.error_message == ""
     assert [item.display_name for item in result.providers] == [
-        "Relay（Codex）",
         "Relay（Claude）",
+        "Relay（Codex）",
         "Gemini Relay（Gemini）",
     ]
     assert [item.provider for item in result.providers] == [
-        OPENAI_COMPATIBLE,
         OPENAI_RESPONSES,
+        OPENAI_COMPATIBLE,
         GOOGLE_GEMINI,
     ]
-    assert result.providers[1].url_mode == "full"
+    assert result.providers[0].url_mode == "full"
     assert database.read_bytes() == before
 
 
@@ -186,7 +186,7 @@ def test_load_cc_switch_providers_disambiguates_duplicate_labels_and_skips_incom
     result = load_cc_switch_providers(database)
 
     assert [item.display_name for item in result.providers] == [
-        "Same（Claude） · abcdefgh",
+        "Same（Claude） · abcdefgh-1",
         "Same（Claude） · abcdefgh-2",
     ]
     assert [item.selection_id for item in result.providers] == [
@@ -234,6 +234,187 @@ def test_load_cc_switch_providers_maps_opencode_first_model(tmp_path: Path) -> N
     assert imported.model == "step-3.7-flash"
     assert imported.url_mode == "auto"
     assert result.skipped_count == 1
+
+
+def test_load_cc_switch_providers_uses_claude_tier_model_and_strips_context_marker(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "cc-switch.db"
+    _create_database(database)
+    _insert_provider(
+        database,
+        provider_id="claude-tier",
+        app_type="claude",
+        name="Tiered",
+        settings={
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://relay.example",
+                "ANTHROPIC_AUTH_TOKEN": "key",
+                "ANTHROPIC_MODEL": "glm-5.3",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.3-flash[1M]",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "glm-5.3-flash",
+            },
+            "model": "fable",
+        },
+    )
+    _insert_provider(
+        database,
+        provider_id="claude-legacy",
+        app_type="claude",
+        name="Legacy",
+        settings={
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://legacy.example",
+                "ANTHROPIC_AUTH_TOKEN": "key",
+                "ANTHROPIC_MODEL": "deepseek-v4-flash[1M]",
+            }
+        },
+    )
+
+    result = load_cc_switch_providers(database)
+
+    models = {item.name: item.model for item in result.providers}
+    assert models == {"Tiered": "glm-5.3-flash", "Legacy": "deepseek-v4-flash"}
+
+
+def test_load_cc_switch_providers_parses_grokbuild_config(tmp_path: Path) -> None:
+    database = tmp_path / "cc-switch.db"
+    _create_database(database)
+    _insert_provider(
+        database,
+        provider_id="grok-1",
+        app_type="grokbuild",
+        name="asia",
+        settings={
+            "config": """
+[models]
+default = "grok-4.5"
+
+[model]
+[model."grok-4.5"]
+model = "grok-4.6"
+base_url = "https://grok.example/v1"
+name = "asia"
+api_backend = "responses"
+api_key = "grok-key"
+"""
+        },
+        sort_index=1,
+    )
+    _insert_provider(
+        database,
+        provider_id="grok-official",
+        app_type="grokbuild",
+        name="Grok Official",
+        settings={"config": ""},
+        sort_index=2,
+    )
+
+    result = load_cc_switch_providers(database)
+
+    assert [item.display_name for item in result.providers] == ["asia（grokbuild）"]
+    imported = result.providers[0]
+    assert imported.provider == OPENAI_RESPONSES
+    assert imported.base_url == "https://grok.example/v1"
+    assert imported.api_key == "grok-key"
+    assert imported.model == "grok-4.6"
+    assert result.skipped_count == 1
+
+
+def test_load_cc_switch_providers_keeps_long_ids_distinguishable(tmp_path: Path) -> None:
+    database = tmp_path / "cc-switch.db"
+    _create_database(database)
+    settings = {
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://relay.example",
+            "ANTHROPIC_API_KEY": "key",
+            "ANTHROPIC_MODEL": "model",
+        }
+    }
+    for index, provider_id in enumerate(
+        ["mycodex-1787292292907", "mycodex-1788912930664"], start=1
+    ):
+        _insert_provider(
+            database,
+            provider_id=provider_id,
+            app_type="claude",
+            name="My Claude",
+            settings=settings,
+            sort_index=index,
+        )
+
+    result = load_cc_switch_providers(database)
+
+    labels = [item.display_name for item in result.providers]
+    assert labels == ["My Claude（claude） · 292907", "My Claude（claude） · 930664"]
+
+
+def test_load_cc_switch_providers_groups_by_app_type_before_sort_index(tmp_path: Path) -> None:
+    database = tmp_path / "cc-switch.db"
+    _create_database(database)
+    claude_settings = {
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://relay.example",
+            "ANTHROPIC_API_KEY": "key",
+            "ANTHROPIC_MODEL": "model",
+        }
+    }
+    codex_settings = {
+        "auth": {"OPENAI_API_KEY": "key"},
+        "config": """
+model_provider = "custom"
+model = "gpt-test"
+[model_providers.custom]
+base_url = "https://codex.example/v1"
+wire_api = "chat"
+""",
+    }
+    # sort_index 是 CC Switch 各组内部的序号，跨组比较没有意义，这里故意交错
+    _insert_provider(
+        database,
+        provider_id="codex-1",
+        app_type="codex",
+        name="Codex A",
+        settings=codex_settings,
+        sort_index=1,
+    )
+    _insert_provider(
+        database,
+        provider_id="claude-1",
+        app_type="claude",
+        name="Claude B",
+        settings=claude_settings,
+        sort_index=2,
+    )
+    _insert_provider(
+        database,
+        provider_id="opencode-1",
+        app_type="opencode",
+        name="OpenCode C",
+        settings={
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": "https://oc.example/v1", "apiKey": "key"},
+            "models": {"oc-model": {}},
+        },
+        sort_index=3,
+    )
+    _insert_provider(
+        database,
+        provider_id="claude-2",
+        app_type="claude",
+        name="Claude D",
+        settings=claude_settings,
+        sort_index=1,
+    )
+
+    result = load_cc_switch_providers(database)
+
+    assert [item.display_name for item in result.providers] == [
+        "Claude D（claude）",
+        "Claude B（claude）",
+        "Codex A（codex）",
+        "OpenCode C（opencode）",
+    ]
 
 
 def test_load_cc_switch_providers_reports_missing_or_incompatible_database(tmp_path: Path) -> None:

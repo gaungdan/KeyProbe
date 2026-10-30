@@ -173,3 +173,16 @@ pyinstaller --noconfirm --clean --onefile --windowed --name KeyProbe --distpath 
 
 - 日志和 cURL 预览对 API Key 脱敏显示（保留首尾若干字符）。
 - `config.json` 仅在启动时读取（`base_url`、`url_mode`、`provider`、`model`、`timeout`、`theme_mode`、`audit_level`），程序不会写入该文件；**API Key 永不落盘**：每次启动需手动输入，或通过「导入 CC Switch 配置」从本地 CC Switch 数据库读取。
+
+## CC Switch 导入
+
+「导入 CC Switch 配置」以只读方式打开 `~/.cc-switch/cc-switch.db`（Windows 下回退 `%HOME%\.cc-switch`），把可检测的配置填充到表单。支持 CC Switch 的 `claude`、`codex`、`gemini`、`opencode`、`grokbuild` 五类条目，只导入同时具备接口地址、密钥与默认模型的配置，其余计入「已跳过」。
+
+兼容点：
+
+- **Claude 档位模型**：新版 CC Switch 把模型选择存为档位（`fable` / `sonnet` / `opus` / `haiku`），实际生效模型在 `ANTHROPIC_DEFAULT_<档位>_MODEL` 中；导入时按档位取值，回退到 `ANTHROPIC_MODEL`，并优先使用不带上下文标记的 `*_MODEL_NAME`。
+- **模型名后缀**：`deepseek-v4-flash[1M]` 这类 CC Switch 内部标记会被剥离，避免拿带后缀的名字去请求接口。
+- **grokbuild**：解析 `[models].default` 与 `[model."<name>"]` 的 TOML 结构，按 `api_backend` 映射协议。
+- **重名条目**：同名配置用 id 尾部区分（如 `My Codex（codex） · 292907`）。
+- **分组展示**：下拉框按客户端分组（Claude / Codex / Gemini / OpenCode / Grok Build），组内沿用 CC Switch 的排序；`sort_index` 是各组内部序号，跨组比较没有意义，因此不再全局混排。
+- 新增的 `provider_endpoints`（多端点自动选择）与 `provider_type`、`cost_multiplier` 等列不影响导入，主地址仍以 `settings_config` 为准。

@@ -49,7 +49,7 @@ class ResultPanel(ctk.CTkFrame):
 
     def _create_widgets(self) -> None:
         readout = ctk.CTkFrame(self, fg_color="transparent")
-        readout.pack(fill="x", padx=theme.GAP_LG, pady=(theme.GAP_LG, theme.GAP_MD))
+        readout.pack(fill="x", padx=theme.GAP_LG, pady=(theme.GAP_MD, theme.GAP_XS))
         readout.grid_columnconfigure(1, weight=1)
         self._build_readout(readout)
         self._build_curl()
@@ -80,16 +80,30 @@ class ResultPanel(ctk.CTkFrame):
         )
         self.context_value.grid(row=1, column=1, sticky="w", padx=(theme.GAP_MD, 0))
 
-        # 延迟读数：数值与单位分开排版，贴齐状态字基线，像仪表上的数字窗
+        # 延迟读数：眉标 + 数值 + 单位三段式，与左栏「状态 + 说明」形成对称结构。
+        # 早先只有一个孤零零的「— ms」，空态时读起来是「破折号毫秒」，
+        # 用户根本不知道这个数字是什么。
         latency_box = ctk.CTkFrame(parent, fg_color="transparent")
-        latency_box.grid(row=0, column=2, sticky="se")
+        latency_box.grid(row=0, column=2, rowspan=2, sticky="e")
+        ctk.CTkLabel(
+            latency_box,
+            text=theme.caps("latency"),
+            font=theme.mono(9, "bold"),
+            text_color=theme.TEXT_FAINT,
+            anchor="e",
+        ).pack(anchor="e")
+
+        latency_row = ctk.CTkFrame(latency_box, fg_color="transparent")
+        latency_row.pack(anchor="e")
         self.latency_value = ctk.CTkLabel(
-            latency_box, text="—", font=theme.mono(23, "bold"), text_color=theme.TEXT_PRIMARY
+            latency_row, text="—", font=theme.mono(23, "bold"), text_color=theme.TEXT_PRIMARY
         )
         self.latency_value.pack(side="left", anchor="s")
-        ctk.CTkLabel(
-            latency_box, text="ms", font=theme.mono(10), text_color=theme.TEXT_FAINT
-        ).pack(side="left", anchor="s", padx=(theme.GAP_XS, 0), pady=(0, 4))
+        self.latency_unit = ctk.CTkLabel(
+            latency_row, text="ms", font=theme.mono(10), text_color=theme.TEXT_FAINT
+        )
+        self.latency_unit.pack(side="left", anchor="s", padx=(theme.GAP_XS, 0), pady=(0, 4))
+        self.latency_unit.pack_forget()
 
     def _build_curl(self) -> None:
         # 眉标与复制按钮同行：按钮贴在读数窗右上角，和它作用的对象靠在一起
@@ -115,15 +129,17 @@ class ResultPanel(ctk.CTkFrame):
 
         self.curl_preview = ctk.CTkTextbox(
             self,
-            height=64,
+            height=76,
             font=theme.mono(12),
             fg_color=theme.WELL,
             text_color=theme.CODE_TEXT,
-            border_width=0,
+            border_width=1,
+            border_color=theme.EDGE,
+            corner_radius=8,
             wrap="char",
             activate_scrollbars=False,
         )
-        self.curl_preview.pack(fill="x", padx=theme.GAP_LG, pady=(0, theme.GAP_LG))
+        self.curl_preview.pack(fill="x", padx=theme.GAP_LG, pady=(0, theme.GAP_SM))
         hide_scrollbar(self.curl_preview)
         # 宽度变化时重新计算换行后的高度，保证内容始终完整展示
         self.curl_preview.bind("<Configure>", self._on_curl_resize)
@@ -138,9 +154,14 @@ class ResultPanel(ctk.CTkFrame):
         self.state_bar.configure(fg_color=color)
 
     def set_latency(self, latency_ms: int | None) -> None:
-        """更新延迟读数。"""
+        """更新延迟读数。空值只显示破折号——单位在没有数值时没有意义。"""
 
-        self.latency_value.configure(text=str(latency_ms) if latency_ms is not None else "—")
+        if latency_ms is None:
+            self.latency_value.configure(text="—")
+            self.latency_unit.pack_forget()
+            return
+        self.latency_value.configure(text=str(latency_ms))
+        self.latency_unit.pack(side="left", anchor="s", padx=(theme.GAP_XS, 0), pady=(0, 4))
 
     def set_provider(self, provider: str) -> None:
         """更新服务商/协议。"""
@@ -165,13 +186,21 @@ class ResultPanel(ctk.CTkFrame):
         self.context_value.configure(text=" · ".join(parts) or "填入接口地址与密钥后开始")
 
     def set_curl(self, curl: str) -> None:
-        """更新 cURL 预览，并按内容撑开高度。"""
+        """更新 cURL 预览。
+
+        高度只在「提交后」重算一次，且上下限收窄到 88–140px：
+        之前每次按键都重算、上限到 400px，输入 URL 的过程中整页内容会跟着上下跳。
+        """
 
         self._curl_text = curl
         self.copy_btn.configure(state="normal" if curl else "disabled")
         self.curl_preview.delete("1.0", "end")
         self.curl_preview.insert("1.0", curl)
-        self.after_idle(lambda: fit_to_wrapped_content(self.curl_preview))
+        self.after_idle(
+            lambda: fit_to_wrapped_content(
+                self.curl_preview, line_height=20, min_height=76, max_height=150
+            )
+        )
 
     def _copy_curl(self) -> None:
         if self._curl_text and self._on_copy:
@@ -184,4 +213,8 @@ class ResultPanel(ctk.CTkFrame):
         if abs(width - self._curl_last_width) < 8:
             return
         self._curl_last_width = width
-        self.after_idle(lambda: fit_to_wrapped_content(self.curl_preview))
+        self.after_idle(
+            lambda: fit_to_wrapped_content(
+                self.curl_preview, line_height=20, min_height=76, max_height=150
+            )
+        )

@@ -18,7 +18,7 @@ from app.models.audit import (
 )
 from app.ui import theme
 from app.ui.widgets import ghost_button
-from app.utils.textbox import hide_scrollbar
+from app.utils.textbox import tint_scrollbar
 
 _SUMMARY_HINTS = {
     Verdict.PASS: "未发现异常",
@@ -69,20 +69,22 @@ class AuditPanel(ctk.CTkFrame):
             header,
             text="复制报告",
             width=80,
-            height=26,
             font=theme.font(12),
             state="disabled",
             command=self._copy_report,
         )
         self.copy_btn.pack(side="right")
 
-        # 计数与身份核对各自成行：挤进一行会被裁切，而这两行都是要逐字读的
+        # 计数与总评同行：它俩读的是同一件事（这份报告有多严重、跑了多少）。
+        # 早先各占一行，把摘要顶到 88px 高，而页签总高是固定的——
+        # 明细窗只剩 74px，报告正文连三行都放不下。
         self.counts_label = ctk.CTkLabel(
-            self, text="", font=theme.mono(11), text_color=theme.TEXT_MUTED,
-            justify="left", anchor="w",
+            header, text="", font=theme.mono(11), text_color=theme.TEXT_MUTED,
+            anchor="e",
         )
-        self.counts_label.pack(fill="x", padx=theme.GAP_XS)
+        self.counts_label.pack(side="right", padx=(0, theme.GAP_MD))
 
+        # 身份核对单独一行：三个模型名要逐字比对，塞进总评行会被裁切
         self.identity_label = ctk.CTkLabel(
             self,
             text=_IDENTITY_PLACEHOLDER,
@@ -91,19 +93,28 @@ class AuditPanel(ctk.CTkFrame):
             justify="left",
             anchor="w",
         )
-        self.identity_label.pack(fill="x", padx=theme.GAP_XS, pady=(2, theme.GAP_SM))
+        self.identity_label.pack(fill="x", padx=theme.GAP_XS, pady=(0, theme.GAP_SM))
 
         self.detail_box = ctk.CTkTextbox(
             self,
-            height=200,
+            # 固定高度，与「执行日志」页同档：页签切换时整块坞不跳高，
+            # 报告超出窗高时在窗内滚动，整块内容由最外层滚动条统一浏览。
+            height=theme.DOCK_BOX_HEIGHT,
             font=theme.mono(12),
             fg_color=theme.WELL,
             text_color=theme.TEXT_PRIMARY,
-            border_width=0,
+            border_width=1,
+            border_color=theme.EDGE,
+            corner_radius=8,
         )
-        # 固定高度，由外层 CTkScrollableFrame 统一滚动，不随报告内容撑高布局。
         self.detail_box.pack(fill="x", padx=theme.GAP_XS, pady=(0, theme.GAP_XS))
-        hide_scrollbar(self.detail_box)
+        # 体检明细通常超过一屏，滚动条要留在，但压成与窗同底的细轨
+        tint_scrollbar(
+            self.detail_box,
+            track=theme.WELL,
+            thumb=theme.EDGE,
+            thumb_hover=theme.SIGNAL_DIM,
+        )
         self._configure_tags()
         # 拦截滚轮事件，避免滚动详情时联动外层 CTkScrollableFrame 一起滚
         self._bind_scroll_block(self.detail_box)
@@ -165,9 +176,9 @@ class AuditPanel(ctk.CTkFrame):
         self.hint_label.configure(text=_SUMMARY_HINTS[verdict])
         self.counts_label.configure(
             text=(
-                f"异常 {counts[Verdict.FAIL]}   可疑 {counts[Verdict.WARN]}"
-                f"   通过 {counts[Verdict.PASS]}   跳过 {counts[Verdict.SKIP]}"
-                f"   ·   {report.call_count} 次调用 {report.total_latency_ms} ms"
+                f"异常 {counts[Verdict.FAIL]} · 可疑 {counts[Verdict.WARN]}"
+                f" · 通过 {counts[Verdict.PASS]} · 跳过 {counts[Verdict.SKIP]}"
+                f" · {report.call_count} 次调用 {report.total_latency_ms} ms"
             )
         )
 

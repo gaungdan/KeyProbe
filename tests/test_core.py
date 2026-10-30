@@ -15,11 +15,34 @@ from app.services.providers import (
 )
 from app.services.url_builder import (
     anthropic_model_urls,
+    anthropic_test_urls,
     full_url_model_urls,
     openai_model_urls,
     openai_test_urls,
+    responses_test_urls,
 )
 from app.utils.security import mask_api_key
+
+
+def test_test_urls_do_not_duplicate_endpoint_suffix() -> None:
+    """用户常把完整端点粘进地址框，此时不能再追加一次后缀。
+
+    曾经 anthropic_test_urls(".../v1/messages") 会拼成
+    ".../v1/messages/v1/messages"，cURL 预览把它原样展示出来。
+    """
+
+    assert anthropic_test_urls("https://token.sensenova.cn/v1/messages") == [
+        "https://token.sensenova.cn/v1/messages"
+    ]
+    assert anthropic_test_urls("https://api.anthropic.com") == [
+        "https://api.anthropic.com/v1/messages"
+    ]
+    assert openai_test_urls("https://proxy.example.com/v1/chat/completions") == [
+        "https://proxy.example.com/v1/chat/completions"
+    ]
+    assert responses_test_urls("https://api.openai.com/v1/responses") == [
+        "https://api.openai.com/v1/responses"
+    ]
 
 
 def test_openai_url_builder_avoids_duplicate_v1() -> None:

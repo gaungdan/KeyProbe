@@ -1,7 +1,8 @@
 """CTkTextbox 辅助：隐藏内置滚动条、按内容自适应高度。
 
-外部主内容区已经是 CTkScrollableFrame，统一由外层滚动条负责滚动，
-内部 textbox 不再各自带一条滚动条，避免出现两层滚动条并排的情况。
+外层主内容区是 CTkScrollableFrame，由它统一负责滚动；
+但页签里的日志窗与体检窗是固定高度、自己滚动的读数窗，
+它们的内置滚动条不能一藏了之——藏掉之后，溢出这件事就没有任何线索了。
 """
 
 from __future__ import annotations
@@ -10,7 +11,10 @@ import customtkinter as ctk
 
 
 def hide_scrollbar(box: ctk.CTkTextbox) -> None:
-    """隐藏 CTkTextbox 自带的垂直滚动条 UI。"""
+    """隐藏 CTkTextbox 自带的垂直滚动条 UI。
+
+    只用于会按内容自动长高的窗（cURL 预览）：它不滚动，所以不需要滚动条。
+    """
 
     scrollbar = getattr(box, "_scrollbar", None)
     if scrollbar is not None:
@@ -18,6 +22,36 @@ def hide_scrollbar(box: ctk.CTkTextbox) -> None:
             scrollbar.pack_forget()
         except Exception:
             pass
+
+
+def tint_scrollbar(
+    box: ctk.CTkTextbox,
+    *,
+    track: str,
+    thumb: str,
+    thumb_hover: str,
+    width: int = 8,
+) -> None:
+    """把内置滚动条压成读数窗里的一道细轨。
+
+    ``CTkTextbox._check_if_scrollbars_needed`` 会在内容溢出时重新 ``pack``
+    这条滚动条，所以 ``pack_forget`` 拦不住——默认亮灰轨道会直接浮在黑底上。
+    这里改色不改显隐：轨道与窗同色（只剩细条本身），
+    滑块用发丝灰，溢出这件事仍然看得见，但不抢正文。
+    """
+
+    scrollbar = getattr(box, "_scrollbar", None)
+    if scrollbar is None:
+        return
+    try:
+        scrollbar.configure(
+            fg_color=track,
+            button_color=thumb,
+            hover_color=thumb_hover,
+            width=width,
+        )
+    except Exception:
+        pass
 
 
 def fit_to_content(

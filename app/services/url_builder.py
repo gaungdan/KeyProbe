@@ -1,5 +1,4 @@
 """Build request URLs for auto and full URL modes."""
-
 from collections.abc import Iterable
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -30,6 +29,21 @@ def join_url(base_url: str, path: str) -> str:
     if base.lower().endswith("/v1") and suffix.lower().startswith("/v1/"):
         suffix = suffix[3:]
     return f"{base}{suffix}"
+
+
+def endpoint_url(base_url: str, path: str) -> str:
+    """Append an endpoint path unless the base URL already points at it.
+
+    Users routinely paste a complete endpoint (``.../v1/messages``) into the
+    address field. Appending blindly turns it into ``.../v1/messages/v1/messages``,
+    which 404s and makes the cURL preview look broken.
+    """
+
+    base = normalize_base_url(base_url)
+    suffix = "/" + path.strip("/")
+    if base.lower().endswith(suffix.lower()):
+        return base
+    return join_url(base, suffix)
 
 
 def unique_urls(urls: Iterable[str]) -> list[str]:
@@ -108,7 +122,7 @@ def openai_model_urls(base_url: str) -> list[str]:
 def openai_test_urls(base_url: str) -> list[str]:
     """Candidate chat completion URLs for OpenAI-compatible providers."""
 
-    return [join_url(base_url, "/chat/completions")]
+    return [endpoint_url(base_url, "/chat/completions")]
 
 
 def anthropic_model_urls(base_url: str) -> list[str]:
@@ -126,7 +140,7 @@ def anthropic_model_urls(base_url: str) -> list[str]:
 def anthropic_test_urls(base_url: str) -> list[str]:
     """Candidate message URLs for Anthropic providers."""
 
-    return [join_url(base_url, "/v1/messages")]
+    return [endpoint_url(base_url, "/v1/messages")]
 
 
 def responses_model_urls(base_url: str) -> list[str]:
@@ -138,7 +152,7 @@ def responses_model_urls(base_url: str) -> list[str]:
 def responses_test_urls(base_url: str) -> list[str]:
     """Candidate OpenAI Responses URLs."""
 
-    return [join_url(base_url, "/responses")]
+    return [endpoint_url(base_url, "/responses")]
 
 
 def gemini_model_urls(base_url: str) -> list[str]:
